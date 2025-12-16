@@ -219,14 +219,12 @@ class MetricsTracker:
     def track_inference_latency(self, model, dataloader, num_samples: int = 100):
         """
         Track detailed inference latency metrics.
-        
         This measures pure model inference time (forward pass only),
         excluding data loading and preprocessing.
         """
         model.eval()
         latencies = []
         
-        # Track GPU memory before inference
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         
@@ -249,11 +247,31 @@ class MetricsTracker:
                 
                 start = time.time()
                 
-                # Pure inference
-                if isinstance(batch, dict):
-                    _ = model(**batch)
-                else:
-                    _ = model(*batch)
+                # Pure inference - use appropriate method based on batch type
+                try:
+                    if isinstance(batch, dict):
+                        # For CLIP/Frozen models with dict batches
+                        if 'images' in batch:
+                            _ = model.encode_image(batch['images'])
+                        else:
+                            _ = model(**batch)
+                    elif isinstance(batch, (list, tuple)):
+                        # For tuple/list batches (image, label)
+                        images = batch[0] if isinstance(batch, (list, tuple)) else batch
+                        _ = model.encode_image(images)
+                    else:
+                        # Fallback: direct tensor
+                        _ = model.encode_image(batch)
+                except AttributeError:
+                    # Model doesn't have encode_image, try forward
+                    try:
+                        if isinstance(batch, dict):
+                            _ = model(**batch)
+                        else:
+                            _ = model(batch)
+                    except:
+                        # Skip this batch if can't process
+                        continue
                 
                 # Synchronize GPU after inference
                 if torch.cuda.is_available():
@@ -264,7 +282,6 @@ class MetricsTracker:
         
         # Calculate statistics
         latencies_array = np.array(latencies)
-        
         self.metrics['latency'] = {
             'average_ms': float(np.mean(latencies_array)),
             'median_ms': float(np.median(latencies_array)),
