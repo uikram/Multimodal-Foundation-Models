@@ -66,3 +66,19 @@ class CLIPLoRA:
     def save_pretrained(self, path):
         """Save LoRA adapter weights."""
         self.model.save_pretrained(path)
+
+    def to(self, device):
+        """Move model to specified device."""
+        self.device = device
+        self.model = self.model.to(device)
+        return self
+    
+    def encode_image(self, images):
+        """Encode images to feature vectors."""
+        vision_outputs = self.model.get_image_features(pixel_values=images)
+        return vision_outputs
+    
+    def encode_text(self, text_tokens):
+        """Encode text tokens to feature vectors."""
+        text_outputs = self.model.get_text_features(input_ids=text_tokens)
+        return text_outputs

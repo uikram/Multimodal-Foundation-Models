@@ -43,3 +43,9 @@ class CLIPBaseline:
         total = sum(p.numel() for p in self.model.parameters())
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         return {'total': total, 'trainable': trainable}
+    
+    def to(self, device):
+        """Move model to specified device."""
+        self.device = device
+        self.model = self.model.to(device)
+        return self

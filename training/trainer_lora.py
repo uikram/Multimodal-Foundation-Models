@@ -56,7 +56,7 @@ class CLIPLoRATrainer:
         
         for epoch in range(self.config.num_epochs):
             epoch_loss = self.train_epoch(epoch, train_loader)
-            
+            self.metrics.track_epoch_metrics(epoch+1, train_loss=epoch_loss)
             # Save checkpoint
             self.save_checkpoint(epoch, epoch_loss)
             

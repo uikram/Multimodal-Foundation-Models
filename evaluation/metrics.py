@@ -14,9 +14,15 @@ from datetime import datetime
 
 class MetricsTracker:
     """Unified metrics tracking for all models."""
-    
+        
     def __init__(self, model_name: str, results_dir: Path):
+        """Initialize metrics tracker."""
         self.model_name = model_name
+        
+        # FIX: Ensure results_dir is a Path object
+        if isinstance(results_dir, str):
+            results_dir = Path(results_dir)
+        
         self.results_dir = results_dir / model_name
         self.results_dir.mkdir(parents=True, exist_ok=True)
         
@@ -26,10 +32,20 @@ class MetricsTracker:
             'memory': {},
             'latency': {},
             'training_time': {},
-            'inference_time': {},  # ← NEW: Separate inference time tracking
-            'evaluation_time': {},  # ← NEW: Complete evaluation time
+            'inference_time': {},
+            'evaluation_time': {},
             'performance': {},
-            'classification_report': {}
+            'classification_report': {},
+            'training_history': {}
+        }
+        
+        # Per-epoch training history
+        self.training_history = {
+            'epochs': [],
+            'train_loss': [],
+            'val_loss': [],
+            'train_accuracy': [],
+            'val_accuracy': []
         }
         
         # Timing trackers
@@ -39,6 +55,8 @@ class MetricsTracker:
         self.inference_end_time = None
         self.eval_start_time = None
         self.eval_end_time = None
+
+
         
     def track_parameters(self, model):
         """Track model parameters."""
@@ -49,6 +67,37 @@ class MetricsTracker:
             'frozen_parameters': param_counts['total'] - param_counts['trainable']
         }
         
+    def track_epoch_metrics(self, epoch: int, train_loss: float = None, 
+                        val_loss: float = None, train_acc: float = None, 
+                        val_acc: float = None):
+        """
+        Track per-epoch training metrics for plotting curves.
+        
+        Args:
+            epoch: Current epoch number (1-indexed)
+            train_loss: Training loss for this epoch
+            val_loss: Validation loss for this epoch (optional)
+            train_acc: Training accuracy for this epoch (optional)
+            val_acc: Validation accuracy for this epoch (optional)
+        """
+        self.training_history['epochs'].append(epoch)
+        
+        if train_loss is not None:
+            self.training_history['train_loss'].append(float(train_loss))
+        
+        if val_loss is not None:
+            self.training_history['val_loss'].append(float(val_loss))
+        
+        if train_acc is not None:
+            self.training_history['train_accuracy'].append(float(train_acc))
+        
+        if val_acc is not None:
+            self.training_history['val_accuracy'].append(float(val_acc))
+        
+        # Update metrics dict for saving
+        self.metrics['training_history'] = self.training_history
+ 
+            
     def start_training_timer(self):
         """Start training timer."""
         self.train_start_time = time.time()
@@ -81,44 +130,6 @@ class MetricsTracker:
         process = psutil.Process()
         cpu_memory_mb = process.memory_info().rss / 1024 / 1024
         self.metrics['memory']['cpu_memory_mb'] = cpu_memory_mb
-        
-    def track_inference_latency(self, model, dataloader, num_samples: int = 100):
-        """Track inference latency."""
-        model.eval()
-        latencies = []
-        
-        with torch.no_grad():
-            for i, batch in enumerate(dataloader):
-                if i >= num_samples:
-                    break
-                    
-                # Move batch to device
-                if isinstance(batch, dict):
-                    batch = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v 
-                            for k, v in batch.items()}
-                elif isinstance(batch, (list, tuple)):
-                    batch = [b.to(model.device) if isinstance(b, torch.Tensor) else b 
-                            for b in batch]
-                
-                start = time.time()
-                # Inference
-                _ = model(**batch) if isinstance(batch, dict) else model(*batch)
-                latency_ms = (time.time() - start) * 1000
-                latencies.append(latency_ms)
-        
-        # self.metrics['latency'] = {
-        #     'average_ms': float(np.mean(latencies)),
-        #     'std_ms': float(np.std(latencies)),
-        #     'min_ms': float(np.min(latencies)),
-        #     'max_ms': float(np.max(latencies)),
-        #     'total_inference_time_s': float(np.sum(latencies) / 1000)
-        # }
-        self.metrics['latency'] = {
-            'average_ms': float(np.mean(latencies)),  
-            'std_ms': float(np.std(latencies)),
-            'min_ms': float(np.min(latencies)),
-            'max_ms': float(np.max(latencies)),
-        }
         
     def track_performance(self, accuracy: float, loss: float):
         """Track performance metrics."""

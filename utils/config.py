@@ -28,7 +28,7 @@ class BaseConfig:
     # Training - MATCH OLD CODE DEFAULTS
     batch_size: int = 8  # ← FIXED: was 128, now 8 (from old FrozenConfig)
     num_epochs: int = 3
-    learning_rate: float = 3e-4  # ← FIXED: was 5e-5, now 3e-4 (from old code)
+    learning_rate: float = 3e-4
     
     def __post_init__(self):
         """Ensure all directories exist."""
@@ -61,7 +61,7 @@ class CLIPLoRAConfig(BaseConfig):
     """Configuration for CLIP + LoRA."""
     
     model_id: str = "openai/clip-vit-base-patch32"
-    batch_size: int = 64  # ← FIXED: LoRA uses 64 (from old code)
+    batch_size: int = 64  
     learning_rate: float = 5e-5
     lora_r: int = 16
     lora_alpha: int = 32
@@ -92,9 +92,9 @@ class FrozenConfig(BaseConfig):
     lm_hidden_dim: int = 1280
     
     # Training params - from old code
-    batch_size: int = 8  # ← Explicitly set for Frozen
-    learning_rate: float = 3e-4
-    weight_decay: float = 0.0
+    batch_size: int = 16
+    learning_rate: float = 3.0e-4
+    weight_decay: float = 0.01
     warmup_steps: int = 1000
     gradient_accumulation_steps: int = 16
     
@@ -125,33 +125,72 @@ class FrozenConfig(BaseConfig):
 
 def load_config_from_yaml(yaml_path: str, model_type: str):
     """
-    Load configuration from YAML file.
-    YAML values take PRIORITY and override defaults!
+    Load configuration from YAML file with robust error handling.
+    YAML values take ABSOLUTE PRIORITY and override ALL defaults!
     """
-    with open(yaml_path, 'r') as f:
-        config_dict = yaml.safe_load(f)
+    # Load YAML with error handling
+    try:
+        with open(yaml_path, 'r') as f:
+            config_dict = yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"⚠️  YAML file not found: {yaml_path}")
+        print(f"⚠️  Using default configuration for {model_type}")
+        config_dict = {}
+    except Exception as e:
+        print(f"⚠️  Error loading YAML: {e}")
+        print(f"⚠️  Using default configuration for {model_type}")
+        config_dict = {}
     
-    # Flatten nested YAML structure (training, model, data sections)
-    flat_dict = {}
-    for section in ['model', 'system', 'data', 'training', 'dataset', 'optimizer', 'evaluation']:
-        if section in config_dict:
-            flat_dict.update(config_dict[section])
-    
-    # Remove None values to let defaults take effect
-    flat_dict = {k: v for k, v in flat_dict.items() if v is not None}
-    
-    # Create config with YAML overrides
+    # Create default config first
     if model_type == 'clip':
-        config = CLIPConfig(**flat_dict)
+        config = CLIPConfig()
     elif model_type == 'clip_lora':
-        config = CLIPLoRAConfig(**flat_dict)
+        config = CLIPLoRAConfig()
     elif model_type == 'frozen':
-        config = FrozenConfig(**flat_dict)
+        config = FrozenConfig()
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     
-    print(f"✓ Loaded config from {yaml_path}")
+    if not config_dict:
+        print(f"✓ Using default {model_type} configuration")
+        return config
+    
+    print(f"\n{'='*60}")
+    print(f"Loading config from: {yaml_path}")
+    print(f"{'='*60}")
+    
+    # Flatten and override with YAML values
+    for section_name, section_values in config_dict.items():
+        if isinstance(section_values, dict):
+            for key, value in section_values.items():
+                if hasattr(config, key):
+                    old_value = getattr(config, key)
+                    
+                    # FIX: Convert Path strings to Path objects
+                    if 'dir' in key or 'path' in key or key in ['data_root', 'cache_dir', 'results_dir', 'plots_dir', 
+                                                                   'output_dir', 'checkpoint_dir', 'train_image_dir', 
+                                                                   'val_image_dir', 'train_file', 'val_file',
+                                                                   'image_dir', 'annotation_file']:
+                        value = Path(value)
+                    
+                    setattr(config, key, value)
+                    
+                    if old_value != value:
+                        print(f"{key}: {old_value} → {value}")
+                else:
+                    # Silently skip unknown keys
+                    pass
+        elif hasattr(config, section_name):
+            # Top-level key
+            old_value = getattr(config, section_name)
+            setattr(config, section_name, section_values)
+    
+    print(f"{'='*60}")
+    print(f"Model Configuration:")
     print(f"  batch_size: {config.batch_size}")
+    print(f"  num_epochs: {config.num_epochs}")
     print(f"  learning_rate: {config.learning_rate}")
+    print(f"{'='*60}\n")
     
     return config
+

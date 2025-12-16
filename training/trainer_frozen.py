@@ -62,6 +62,7 @@ class FrozenTrainer:
         for epoch in range(self.config.num_epochs):
             train_loss = self.train_epoch(epoch, train_loader)
             val_loss = self.validate(val_loader)
+            self.metrics.track_epoch_metrics(epoch+1, train_loss=train_loss, val_loss=val_loss)
             
             print(f"\n{'='*60}")
             print(f"Epoch {epoch+1}/{self.config.num_epochs} Complete")
@@ -71,17 +72,17 @@ class FrozenTrainer:
             # Save checkpoint
             self.save_checkpoint(epoch, val_loss)
         
-        # End timer
-        self.metrics.end_training_timer()
-        
-        # Track memory after training
-        self.metrics.track_gpu_memory('post_training')
-        
-        # Track final performance
-        self.metrics.track_performance(accuracy=0.0, loss=self.best_val_loss)
-        
-        print("\n✅ Training Complete!")
-        print(f"Best Validation Loss: {self.best_val_loss:.4f}")
+            # End timer
+            self.metrics.end_training_timer()
+
+            # Track memory after training
+            self.metrics.track_gpu_memory('post_training')
+
+            # Track final training performance
+            self.metrics.track_performance(accuracy=0.0, loss=self.best_val_loss) 
+
+            print("\n✅ Training Complete!")
+            print(f"Best Validation Loss: {self.best_val_loss:.4f}")
     
     def get_dataloaders(self):
         """Get training and validation dataloaders."""

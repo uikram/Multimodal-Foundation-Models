@@ -10,60 +10,21 @@ from sklearn.linear_model import LogisticRegression
 from .metrics import MetricsTracker
 import time
 
+
 class ModelEvaluator:
     """Unified evaluator for all model types."""
-    
+
     def __init__(self, model, config, metrics_tracker: MetricsTracker):
         self.model = model
         self.config = config
         self.metrics = metrics_tracker
         self.device = config.device
-    
-    def linear_probe_evaluation(self, train_dataset, test_dataset):
-        """Perform linear probe evaluation with timing."""
-        
-        # Start overall evaluation timer
-        self.metrics.start_evaluation_timer()
-        
-        print("Extracting training features...")
-        train_features, train_labels = self.extract_features(train_dataset)
-        
-        print("Extracting test features...")
-        
-        # Start inference timer specifically for test set
-        self.metrics.start_inference_timer()
-        test_features, test_labels = self.extract_features(test_dataset)
-        self.metrics.end_inference_timer()
-        
-        print("Training logistic regression...")
-        classifier = LogisticRegression(
-            random_state=0,
-            C=self.config.logistic_regression_c,
-            max_iter=1000,
-            verbose=1,
-            n_jobs=-1,
-            solver='lbfgs'
-        )
-        classifier.fit(train_features, train_labels)
-        
-        print("Evaluating...")
-        predictions = classifier.predict(test_features)
-        accuracy = np.mean((test_labels == predictions).astype(float)) * 100.0
-        
-        # End overall evaluation timer
-        self.metrics.end_evaluation_timer()
-        
-        # Track classification report
-        self.metrics.track_classification_report(test_labels, predictions)
-        
-        return accuracy, len(test_labels)
-    
-    def zero_shot_evaluation(self, dataset, text_classifier):
-        """Perform zero-shot evaluation with timing."""
-        
-        # Start overall evaluation timer
-        self.metrics.start_evaluation_timer()
-        
+
+    def extract_features(self, dataset):
+        """
+        Extract features from a dataset using the model's image encoder.
+        Returns features and labels as numpy arrays.
+        """
         dataloader = DataLoader(
             dataset,
             batch_size=self.config.batch_size,
@@ -71,41 +32,116 @@ class ModelEvaluator:
             num_workers=self.config.num_workers,
             pin_memory=True
         )
-        
+
+        all_features = []
+        all_labels = []
+
+        self.model.eval()
+        with torch.no_grad():
+            for images, labels in tqdm(dataloader, desc="Extracting features"):
+                images = images.to(self.device)
+
+                # Encode images
+                features = self.model.encode_image(images)
+
+                # Normalize features
+                features = features / features.norm(dim=-1, keepdim=True)
+
+                all_features.append(features.cpu())
+                all_labels.append(labels)
+
+        # Concatenate all batches
+        all_features = torch.cat(all_features, dim=0).numpy()
+        all_labels = torch.cat(all_labels, dim=0).numpy()
+
+        return all_features, all_labels
+
+    def linear_probe_evaluation(self, train_dataset, test_dataset):
+        """Perform linear probe evaluation with timing."""
+        # Start overall evaluation timer
+        self.metrics.start_evaluation_timer()
+
+        print("Extracting training features...")
+        train_features, train_labels = self.extract_features(train_dataset)
+
+        print("Extracting test features...")
+        # Start inference timer specifically for test set
+        self.metrics.start_inference_timer()
+        test_features, test_labels = self.extract_features(test_dataset)
+        self.metrics.end_inference_timer()
+
+        print("Training logistic regression...")
+        # Get logistic regression C parameter
+        C = getattr(self.config, 'logistic_regression_c', 0.316)
+
+        classifier = LogisticRegression(
+            random_state=0,
+            C=C,
+            max_iter=1000,
+            verbose=1,
+            n_jobs=-1,
+            solver='lbfgs'
+        )
+        classifier.fit(train_features, train_labels)
+
+        print("Evaluating...")
+        predictions = classifier.predict(test_features)
+        accuracy = np.mean((test_labels == predictions).astype(float)) * 100.0
+
+        # End overall evaluation timer
+        self.metrics.end_evaluation_timer()
+
+        # Track classification report
+        self.metrics.track_classification_report(test_labels, predictions)
+
+        return accuracy, len(test_labels)
+
+    def zero_shot_evaluation(self, dataset, text_classifier):
+        """Perform zero-shot evaluation with timing."""
+        # Start overall evaluation timer
+        self.metrics.start_evaluation_timer()
+
+        dataloader = DataLoader(
+            dataset,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            num_workers=self.config.num_workers,
+            pin_memory=True
+        )
+
         all_predictions = []
         all_labels = []
-        
+
         # Track pure inference time
         inference_times = []
-        
+
         self.model.eval()
         with torch.no_grad():
             for images, labels in tqdm(dataloader, desc="Zero-Shot Eval"):
                 images = images.to(self.device)
                 labels = labels.to(self.device)
-                
+
                 # Time pure inference
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
-                
                 inference_start = time.time()
-                
+
                 image_features = self.model.encode_image(images)
                 image_features /= image_features.norm(dim=-1, keepdim=True)
-                logits = (100.0 * image_features @ text_classifier.T)
+
+                logits = (100.0 * image_features @ text_classifier)
                 _, predictions = logits.max(1)
-                
+
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
-                
                 inference_times.append(time.time() - inference_start)
-                
+
                 all_predictions.append(predictions.cpu())
                 all_labels.append(labels.cpu())
-        
+
         # End overall evaluation timer
         self.metrics.end_evaluation_timer()
-        
+
         # Record inference time
         total_inference_time = sum(inference_times)
         self.metrics.metrics['inference_time'] = {
@@ -114,62 +150,61 @@ class ModelEvaluator:
             'total_hours': total_inference_time / 3600,
             'average_per_batch_ms': (total_inference_time / len(inference_times)) * 1000
         }
-        
+
         all_predictions = torch.cat(all_predictions).numpy()
         all_labels = torch.cat(all_labels).numpy()
-        
         accuracy = np.mean((all_labels == all_predictions).astype(float)) * 100.0
-        
+
         # Track classification report
         self.metrics.track_classification_report(all_labels, all_predictions)
-        
+
         return accuracy, len(all_labels)
 
-    
     def few_shot_evaluation(self, train_dataset, test_dataset, k_shots):
         """Perform few-shot evaluation."""
         print("Caching features for few-shot...")
         train_features, train_labels = self.extract_features(train_dataset)
         test_features, test_labels = self.extract_features(test_dataset)
-        
+
         results = {}
         unique_classes = np.unique(train_labels)
-        
+
+        # Get logistic regression C parameter
+        C = getattr(self.config, 'logistic_regression_c', 0.316)
+
         for k in k_shots:
             print(f"Evaluating {k}-shot...")
+
             indices = []
-            
             for c in unique_classes:
                 c_indices = np.where(train_labels == c)[0]
                 n_samples = min(len(c_indices), k)
-                
+
                 if n_samples > 0:
                     chosen = np.random.choice(c_indices, n_samples, replace=False)
                     indices.extend(chosen)
-            
+
             if len(indices) == 0:
                 continue
-            
+
             k_features = train_features[indices]
             k_labels = train_labels[indices]
-            
+
             try:
                 clf = LogisticRegression(
                     random_state=0,
-                    C=self.config.logistic_regression_c,
+                    C=C,
                     max_iter=1000,
                     verbose=0,
                     n_jobs=-1,
                     solver='lbfgs'
                 )
                 clf.fit(k_features, k_labels)
-                
                 predictions = clf.predict(test_features)
                 accuracy = np.mean((test_labels == predictions).astype(float)) * 100.0
-                
                 results[f"{k}-shot"] = accuracy
                 print(f"  {k}-shot Accuracy: {accuracy:.2f}%")
             except Exception as e:
                 print(f"  {k}-shot Failed: {e}")
-        
+
         return results
