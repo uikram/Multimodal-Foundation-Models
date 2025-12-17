@@ -16,7 +16,7 @@ system:
 data:
   train_image_dir: "../conceptual_captions_data"
   train_file: "../conceptual_captions_data/train.jsonl"
-  val_image_dir: "../conceptual_captions_data/validation"
+  val_image_dir: "../conceptual_captions_data"
   val_file: "../conceptual_captions_data/validation.jsonl"
   image_size: 224
   max_caption_length: 128

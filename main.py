@@ -203,23 +203,25 @@ def train_model(model, config, metrics_tracker):
     print(f"\n{'-'*60}")
     print("Starting Training")
     print(f"{'-'*60}")
-
+    
     if hasattr(config, 'vision_encoder_name'):
         from training.trainer_frozen import FrozenTrainer
         trainer = FrozenTrainer(model, config, metrics_tracker)
     else:
         from training.train import ModelTrainer
         trainer = ModelTrainer(model, config, metrics_tracker)
-
+    
     trainer.train()
     print("\nTraining completed successfully!")
+    metrics_tracker.save_metrics()
+    
     # Generate training curves immediately after training
     try:
         from utils.plotting import plot_training_curves
         model_name = metrics_tracker.model_name  # Already uppercase
         plot_training_curves(model_name, config.results_dir, Path('plots'))
     except Exception as e:
-        print(f"⚠️ Training curve generation failed: {e}")
+        print(f"⚠️  Training curve generation failed: {e}")
 
 def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
     """
@@ -451,19 +453,19 @@ def run_full_pipeline(model_name: str, config_path: str = None, datasets_to_eval
     """Run complete training and evaluation pipeline."""
     # Initialize
     model, config, metrics_tracker = initialize_model(model_name, config_path)
-
-    # Train
+    
+    # Train (now saves metrics internally)
     train_model(model, config, metrics_tracker)
-
+    
     # Load best checkpoint for evaluation
     model = load_model_checkpoint(model, model_name, config)
-
+    
     # Evaluate
     evaluate_model(model, config, metrics_tracker, datasets_to_eval)
-
-    # Save metrics
-    metrics_tracker.save_metrics()
-
+    
+    # Save final evaluation metrics
+    metrics_tracker.save_metrics() 
+    
     # Print summary
     metrics_tracker.print_summary()
 
