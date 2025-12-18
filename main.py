@@ -108,6 +108,7 @@ def get_models_list(models_arg):
 def load_model_checkpoint(model, model_name, config):
     """Load trained checkpoint for evaluation."""
     from pathlib import Path
+    import torch
     
     if model_name == 'clip_lora':
         # LoRA saves adapter checkpoints per epoch (epoch_1, epoch_2, epoch_3)
@@ -117,11 +118,11 @@ def load_model_checkpoint(model, model_name, config):
         epoch_dirs = sorted(checkpoint_dir.glob("epoch_*"))
         
         if not epoch_dirs:
-            print(f"⚠️  No checkpoints found in {checkpoint_dir}")
+            print(f"No checkpoints found in {checkpoint_dir}")
             return model
         
         latest_checkpoint = epoch_dirs[-1]  # Get last epoch (epoch_3)
-        print(f"✓ Loading CLIP-LoRA checkpoint from: {latest_checkpoint}")
+        print(f"Loading CLIP-LoRA checkpoint from: {latest_checkpoint}")
         
         # Load adapter weights
         from peft import set_peft_model_state_dict
@@ -131,10 +132,10 @@ def load_model_checkpoint(model, model_name, config):
         adapter_file_bin = latest_checkpoint / "adapter_model.bin"
         
         if adapter_file_safetensors.exists():
-            print("✓ Loading from .safetensors format")
+            print("Loading from .safetensors format")
             adapter_weights = load_file(str(adapter_file_safetensors))
         elif adapter_file_bin.exists():
-            print("✓ Loading from .bin format")
+            print("Loading from .bin format")
             adapter_weights = torch.load(adapter_file_bin, map_location=config.device)
         else:
             print(f"No adapter_model file found in {latest_checkpoint}")
@@ -142,20 +143,37 @@ def load_model_checkpoint(model, model_name, config):
         
         # Apply to existing model (wrapper.model)
         set_peft_model_state_dict(model.model, adapter_weights)
-        print("✓ Loaded LoRA adapter weights")
+        print("Loaded LoRA adapter weights")
         
     elif model_name == 'frozen':
         checkpoint_path = config.checkpoint_dir / "best_model.pt"
         
         if not checkpoint_path.exists():
-            print(f" No checkpoint found at {checkpoint_path}")
+            print(f"No checkpoint found at {checkpoint_path}")
             return model
         
-        print(f"✓ Loading Frozen checkpoint from: {checkpoint_path}")
+        print(f"Loading Frozen checkpoint from: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=config.device)
-        
-        model.vision_encoder.load_state_dict(checkpoint['model_state'])
-        print(f"✓ Loaded vision encoder with {len(checkpoint['model_state'])} parameters")
+    
+        # Handle different checkpoint formats (wrapped dict vs raw state_dict)
+        if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
+            state_dict = checkpoint['model_state']
+            print("  (Detected dictionary format with 'model_state' key)")
+        elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+            print("  (Detected dictionary format with 'state_dict' key)")
+        else:
+            # Assume the checkpoint itself is the state dictionary (Common in older code)
+            state_dict = checkpoint
+            print("  (Detected raw state_dict format)")
+
+        try:
+            model.vision_encoder.load_state_dict(state_dict, strict=False)
+            print(f"Loaded vision encoder with {len(state_dict)} parameters")
+        except Exception as e:
+            print(f"Error loading weights: {e}")
+            if isinstance(checkpoint, dict):
+                print(f"   Available keys in checkpoint: {list(checkpoint.keys())}")
     
     return model
 

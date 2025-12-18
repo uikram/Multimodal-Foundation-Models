@@ -1,4 +1,4 @@
 {
-    "inference_peak_gpu_mb": 777.34912109375,
-    "inference_current_gpu_mb": 625.8486328125
+    "inference_peak_gpu_mb": 433.70703125,
+    "inference_current_gpu_mb": 344.73779296875
 }
