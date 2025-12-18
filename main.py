@@ -288,10 +288,14 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
                 print(f"\n[1/3] Zero-Shot Evaluation")
                 try:
                     text_classifier = create_text_classifier(model, classnames, templates, config.device)
-                    zs_acc, zs_samples = evaluator.zero_shot_evaluation(test_dataset, text_classifier)
-                    all_results['zero_shot'][dataset_name] = {'accuracy': zs_acc, 'num_samples': zs_samples}
-                    print(f"   {dataset_name} Zero-Shot: {zs_acc:.2f}%")
-                    metrics_tracker.track_performance(accuracy=zs_acc, loss=0.0)
+                    zs_results = evaluator.zero_shot_evaluation(test_dataset, text_classifier)
+                    all_results['zero_shot'][dataset_name] = zs_results  # Now stores {'top1': 68.5, 'top5': 89.2, 'num_samples': 10000}
+                    print(f"   {dataset_name} Zero-Shot → Top-1: {zs_results['top1']:.2f}% | Top-5: {zs_results['top5']:.2f}%")
+                    metrics_tracker.track_performance(
+                                                        accuracy=zs_results['top1'], 
+                                                        top5_accuracy=zs_results['top5'],
+                                                        loss=0.0
+                                                    )
                 except Exception as e:
                     print(f"✗ Zero-shot failed: {e}")
             else:
@@ -330,7 +334,6 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
             traceback.print_exc()
             continue
 
-    # === FIX 2: Track detailed latency metrics (once, after all datasets) ===
     print(f"\n{'='*60}")
     print("Measuring Detailed Inference Latency")
     print(f"{'='*60}")
@@ -349,9 +352,9 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
         print(f"⚠️  Latency tracking failed: {e}")
 
     import json
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_file = metrics_tracker.results_dir / f"evaluation_results_{timestamp}.json"
+    # from datetime import datetime
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_file = metrics_tracker.results_dir / f"evaluation_results.json"
     try:
         with open(results_file, 'w') as f:
             json.dump(all_results, f, indent=4)

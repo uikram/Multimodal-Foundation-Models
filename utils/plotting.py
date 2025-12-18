@@ -12,15 +12,15 @@ def load_metrics(model_name: str, results_dir: Path, metric_type: str):
     """Load metrics from JSON file."""
     model_dir = results_dir / model_name
     
-    # Find the most recent metric file
-    metric_files = list(model_dir.glob(f"{metric_type}_*.json"))
-    if not metric_files:
+    # Load fixed filename (no timestamp)
+    metric_file = model_dir / f"{metric_type}.json" 
+    
+    if not metric_file.exists():
         return None
     
-    # Sort by timestamp and get most recent
-    latest_file = sorted(metric_files)[-1]
-    with open(latest_file, 'r') as f:
+    with open(metric_file, 'r') as f:
         return json.load(f)
+
 
 
 def plot_training_curves(model_name: str, results_dir: Path, plots_dir: Path):

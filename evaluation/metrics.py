@@ -131,12 +131,27 @@ class MetricsTracker:
         cpu_memory_mb = process.memory_info().rss / 1024 / 1024
         self.metrics['memory']['cpu_memory_mb'] = cpu_memory_mb
         
-    def track_performance(self, accuracy: float, loss: float):
-        """Track performance metrics."""
+    def track_performance(self, accuracy: float = None, top5_accuracy: float = None, loss: float = 0.0):
+        """
+        Track performance metrics.
+        
+        Args:
+            accuracy: Top-1 accuracy (primary metric)
+            top5_accuracy: Top-5 accuracy (optional)
+            loss: Final loss value
+        """
         self.metrics['performance'] = {
-            'accuracy': float(accuracy),
             'final_loss': float(loss)
         }
+        
+        # Track Top-1 if provided
+        if accuracy is not None:
+            self.metrics['performance']['top1_accuracy'] = float(accuracy)
+        
+        # Track Top-5 if provided
+        if top5_accuracy is not None:
+            self.metrics['performance']['top5_accuracy'] = float(top5_accuracy)
+
         
     def track_classification_report(self, y_true, y_pred, class_names=None):
         """Generate and track classification report."""
@@ -152,17 +167,18 @@ class MetricsTracker:
         
     def save_metrics(self, run_id: str = None):
         """Save all metrics to JSON files."""
-        if run_id is None:
-            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Remove timestamp - use simple filenames
+        # if run_id is None:
+        #     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         for metric_type, data in self.metrics.items():
             if data:  # Only save if there's data
-                filename = f"{metric_type}_{run_id}.json"
+                # Use simple filename without timestamp
+                filename = f"{metric_type}.json"  # ← CHANGED: No run_id suffix
                 filepath = self.results_dir / filename
                 
                 with open(filepath, 'w') as f:
                     json.dump(data, f, indent=4)
-                
                 print(f"Saved {metric_type} to {filepath}")
         
     def load_metrics(self, run_id: str):
