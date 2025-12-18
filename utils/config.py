@@ -25,8 +25,8 @@ class BaseConfig:
     num_workers: int = 4
     seed: int = 42
     
-    # Training - MATCH OLD CODE DEFAULTS
-    batch_size: int = 8  # ← FIXED: was 128, now 8 (from old FrozenConfig)
+    # Training
+    batch_size: int = 8
     num_epochs: int = 3
     learning_rate: float = 3e-4
     
@@ -44,14 +44,17 @@ class BaseConfig:
         os.environ['HF_HOME'] = str(self.cache_dir)
         os.environ['TORCH_HOME'] = str(self.cache_dir)
         os.environ['XDG_CACHE_HOME'] = str(self.cache_dir)
+        # Fix tokenizer warnings
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 @dataclass
 class CLIPConfig(BaseConfig):
-    """Configuration for CLIP Baseline."""
+    """Configuration for CLIP Baseline (Hugging Face)."""
     
-    model_name: str = "ViT-B-32"
-    pretrained_tag: str = "openai"
-    batch_size: int = 128  # CLIP uses larger batch
+    # --- CHANGED: Use Hugging Face ID instead of 'ViT-B-32' ---
+    model_name: str = "openai/clip-vit-base-patch32"
+    
+    batch_size: int = 128
     learning_rate: float = 5e-5
     logistic_regression_c: float = 0.316
     k_shots: List[int] = field(default_factory=lambda: [1, 2, 4, 8, 16])
@@ -60,7 +63,9 @@ class CLIPConfig(BaseConfig):
 class CLIPLoRAConfig(BaseConfig):
     """Configuration for CLIP + LoRA."""
     
+    # --- CHANGED: Use Hugging Face ID ---
     model_id: str = "openai/clip-vit-base-patch32"
+    
     batch_size: int = 64  
     learning_rate: float = 5e-5
     lora_r: int = 16
@@ -70,7 +75,7 @@ class CLIPLoRAConfig(BaseConfig):
     max_length: int = 77
     output_dir: Path = field(default_factory=lambda: Path("clip_lora_checkpoints"))
     
-    # Conceptual Captions paths - will be overridden by YAML
+    # Conceptual Captions paths
     image_dir: Path = field(default_factory=lambda: Path("../conceptual_captions_data"))
     annotation_file: Path = field(default_factory=lambda: Path("../conceptual_captions_data/train.jsonl"))
     
@@ -91,7 +96,7 @@ class FrozenConfig(BaseConfig):
     vision_hidden_dim: int = 2048
     lm_hidden_dim: int = 1280
     
-    # Training params - from old code
+    # Training params
     batch_size: int = 16
     learning_rate: float = 3.0e-4
     weight_decay: float = 0.01
@@ -106,7 +111,7 @@ class FrozenConfig(BaseConfig):
     output_dir: Path = field(default_factory=lambda: Path("frozen_outputs"))
     checkpoint_dir: Path = field(default_factory=lambda: Path("frozen_checkpoints"))
     
-    # Conceptual Captions paths - will be overridden by YAML
+    # Conceptual Captions paths
     train_image_dir: Path = field(default_factory=lambda: Path("../conceptual_captions_data"))
     train_file: Path = field(default_factory=lambda: Path("../conceptual_captions_data/train.jsonl"))
     val_image_dir: Path = field(default_factory=lambda: Path("../conceptual_captions_data/validation"))
@@ -126,19 +131,12 @@ class FrozenConfig(BaseConfig):
 def load_config_from_yaml(yaml_path: str, model_type: str):
     """
     Load configuration from YAML file with robust error handling.
-    YAML values take ABSOLUTE PRIORITY and override ALL defaults!
     """
-    # Load YAML with error handling
     try:
         with open(yaml_path, 'r') as f:
             config_dict = yaml.safe_load(f)
-    except FileNotFoundError:
-        print(f"⚠️  YAML file not found: {yaml_path}")
-        print(f"⚠️  Using default configuration for {model_type}")
-        config_dict = {}
     except Exception as e:
         print(f"⚠️  Error loading YAML: {e}")
-        print(f"⚠️  Using default configuration for {model_type}")
         config_dict = {}
     
     # Create default config first
@@ -152,45 +150,25 @@ def load_config_from_yaml(yaml_path: str, model_type: str):
         raise ValueError(f"Unknown model type: {model_type}")
     
     if not config_dict:
-        print(f"✓ Using default {model_type} configuration")
         return config
     
     print(f"\n{'='*60}")
     print(f"Loading config from: {yaml_path}")
     print(f"{'='*60}")
     
-    # Flatten and override with YAML values
+    # Flatten and override
     for section_name, section_values in config_dict.items():
         if isinstance(section_values, dict):
             for key, value in section_values.items():
                 if hasattr(config, key):
                     old_value = getattr(config, key)
-                    
-                    # FIX: Convert Path strings to Path objects
-                    if 'dir' in key or 'path' in key or key in ['data_root', 'cache_dir', 'results_dir', 'plots_dir', 
-                                                                   'output_dir', 'checkpoint_dir', 'train_image_dir', 
-                                                                   'val_image_dir', 'train_file', 'val_file',
-                                                                   'image_dir', 'annotation_file']:
+                    if 'dir' in key or 'path' in key or 'file' in key or key in ['data_root']:
                         value = Path(value)
-                    
                     setattr(config, key, value)
-                    
                     if old_value != value:
-                        print(f"{key}: {old_value} → {value}")
-                else:
-                    # Silently skip unknown keys
-                    pass
+                        print(f"{key}: {old_value} -> {value}")
         elif hasattr(config, section_name):
-            # Top-level key
             old_value = getattr(config, section_name)
             setattr(config, section_name, section_values)
-    
-    print(f"{'='*60}")
-    print(f"Model Configuration:")
-    print(f"  batch_size: {config.batch_size}")
-    print(f"  num_epochs: {config.num_epochs}")
-    print(f"  learning_rate: {config.learning_rate}")
-    print(f"{'='*60}\n")
-    
+            
     return config
-

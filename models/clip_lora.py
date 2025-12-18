@@ -40,45 +40,55 @@ class CLIPLoRA:
         
         print("LoRA Configuration:")
         self.model.print_trainable_parameters()
+
+    def tokenize(self, texts):
+        """
+        Tokenize texts using the model's processor.
+        Returns a dictionary containing input_ids and attention_mask.
+        """
+        inputs = self.processor(
+            text=texts, 
+            padding=True, 
+            truncation=True, 
+            return_tensors="pt"
+        )
+        return {k: v.to(self.device) for k, v in inputs.items()}
         
     def forward(self, **kwargs):
         """Forward pass through the model."""
         return self.model(**kwargs, return_loss=True)
     
     def eval(self):
-        """Set model to evaluation mode."""
         self.model.eval()
         
     def train(self):
-        """Set model to training mode."""
         self.model.train()
         
     def parameters(self):
-        """Return model parameters."""
         return self.model.parameters()
     
     def count_parameters(self):
-        """Count total and trainable parameters."""
         total = sum(p.numel() for p in self.model.parameters())
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         return {'total': total, 'trainable': trainable}
     
     def save_pretrained(self, path):
-        """Save LoRA adapter weights."""
         self.model.save_pretrained(path)
 
     def to(self, device):
-        """Move model to specified device."""
         self.device = device
         self.model = self.model.to(device)
         return self
     
     def encode_image(self, images):
-        """Encode images to feature vectors."""
         vision_outputs = self.model.get_image_features(pixel_values=images)
         return vision_outputs
     
-    def encode_text(self, text_tokens):
-        """Encode text tokens to feature vectors."""
-        text_outputs = self.model.get_text_features(input_ids=text_tokens)
-        return text_outputs
+    def encode_text(self, tokenized_inputs):
+        """Encode text using input_ids and attention_mask."""
+        # Support both dictionary input and raw tensors for backward compatibility if needed
+        if isinstance(tokenized_inputs, dict):
+            return self.model.get_text_features(**tokenized_inputs)
+        else:
+            # Fallback if just input_ids passed
+            return self.model.get_text_features(input_ids=tokenized_inputs)

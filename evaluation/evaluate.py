@@ -51,6 +51,9 @@ class ModelEvaluator:
                 all_labels.append(labels)
 
         # Concatenate all batches
+        if not all_features:
+            return np.array([]), np.array([])
+            
         all_features = torch.cat(all_features, dim=0).numpy()
         all_labels = torch.cat(all_labels, dim=0).numpy()
 
@@ -97,17 +100,7 @@ class ModelEvaluator:
         return accuracy, len(test_labels)
 
     def calculate_top_k_accuracy(self, logits, labels, k=5):
-        """
-        Calculate Top-K accuracy.
-        
-        Args:
-            logits: torch.Tensor [batch_size, num_classes] prediction scores
-            labels: torch.Tensor [batch_size] ground truth labels
-            k: Top-K to calculate (default: 5)
-        
-        Returns:
-            Top-K accuracy as percentage
-        """
+        """Calculate Top-K accuracy."""
         # Get top-k predictions
         _, top_k_preds = logits.topk(k, dim=1, largest=True, sorted=True)
         
@@ -151,6 +144,7 @@ class ModelEvaluator:
                 image_features = self.model.encode_image(images)
                 image_features /= image_features.norm(dim=-1, keepdim=True)
 
+                # text_classifier is already on device and normalized
                 logits = (100.0 * image_features @ text_classifier)
                 
                 if torch.cuda.is_available():
@@ -169,15 +163,19 @@ class ModelEvaluator:
         self.metrics.end_evaluation_timer()
 
         # Record inference time
-        total_inference_time = sum(inference_times)
-        self.metrics.metrics['inference_time'] = {
-            'total_seconds': total_inference_time,
-            'total_minutes': total_inference_time / 60,
-            'total_hours': total_inference_time / 3600,
-            'average_per_batch_ms': (total_inference_time / len(inference_times)) * 1000
-        }
+        if inference_times:
+            total_inference_time = sum(inference_times)
+            self.metrics.metrics['inference_time'] = {
+                'total_seconds': total_inference_time,
+                'total_minutes': total_inference_time / 60,
+                'total_hours': total_inference_time / 3600,
+                'average_per_batch_ms': (total_inference_time / len(inference_times)) * 1000
+            }
 
         # Concatenate all batches
+        if not all_logits:
+             return {'top1': 0.0, 'top5': 0.0, 'num_samples': 0}
+
         all_logits = torch.cat(all_logits)
         all_predictions = torch.cat(all_predictions)
         all_labels = torch.cat(all_labels)
@@ -190,7 +188,6 @@ class ModelEvaluator:
         if num_classes >= 5:
             top5_accuracy = self.calculate_top_k_accuracy(all_logits, all_labels, k=5)
         else:
-            # If fewer than 5 classes, Top-5 = Top-1
             top5_accuracy = top1_accuracy
             print(f"⚠️  Dataset has only {num_classes} classes. Top-5 = Top-1")
 
@@ -198,16 +195,14 @@ class ModelEvaluator:
         print(f"✓ Top-1 Accuracy: {top1_accuracy:.2f}%")
         print(f"✓ Top-5 Accuracy: {top5_accuracy:.2f}%")
 
-        # Track classification report (using Top-1 predictions)
+        # Track classification report
         self.metrics.track_classification_report(all_labels.numpy(), all_predictions.numpy())
 
-        # Return both accuracies
         return {
             'top1': top1_accuracy,
             'top5': top5_accuracy,
             'num_samples': len(all_labels)
         }
-
 
     def few_shot_evaluation(self, train_dataset, test_dataset, k_shots):
         """Perform few-shot evaluation."""
@@ -217,7 +212,7 @@ class ModelEvaluator:
 
         results = {}
         unique_classes = np.unique(train_labels)
-
+        
         # Get logistic regression C parameter
         C = getattr(self.config, 'logistic_regression_c', 0.316)
 
@@ -253,7 +248,7 @@ class ModelEvaluator:
                 accuracy = np.mean((test_labels == predictions).astype(float)) * 100.0
                 
                 # Track classification report for the final k-shot value
-                if k == k_shots[-1]:  # Only for last k (e.g., 16-shot)
+                if k == k_shots[-1]:  
                     self.metrics.track_classification_report(test_labels, predictions)
 
                 results[f"{k}-shot"] = accuracy

@@ -1,30 +1,46 @@
 """
-CLIP Baseline Model - Pretrained OpenAI CLIP for zero-shot and linear probe evaluation.
+CLIP Baseline Model - Hugging Face implementation for fair comparison.
 """
 
 import torch
-import open_clip
+from transformers import CLIPModel, CLIPProcessor
 
 class CLIPBaseline:
     def __init__(self, config):
         self.config = config
         self.device = config.device
         
-        print(f"Loading CLIP Baseline: {config.model_name}")
-        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-            config.model_name,
-            pretrained=config.pretrained_tag,
-            device=self.device
-        )
-        self.tokenizer = open_clip.get_tokenizer(config.model_name)
+        print(f"Loading CLIP Baseline (Hugging Face): {config.model_name}")
         
+        # Load model and processor from Hugging Face
+        self.model = CLIPModel.from_pretrained(config.model_name)
+        self.processor = CLIPProcessor.from_pretrained(config.model_name)
+        
+        self.model.to(self.device)
+        self.model.eval()
+
+    def tokenize(self, texts):
+        """
+        Tokenize texts using the model's processor.
+        Returns a dictionary containing input_ids and attention_mask.
+        """
+        inputs = self.processor(
+            text=texts, 
+            padding=True, 
+            truncation=True, 
+            return_tensors="pt"
+        )
+        return {k: v.to(self.device) for k, v in inputs.items()}
+
     def encode_image(self, images):
         """Encode images to feature vectors."""
-        return self.model.encode_image(images)
+        # Assuming images are already tensors (pixel_values) from the dataloader
+        return self.model.get_image_features(pixel_values=images)
     
-    def encode_text(self, text_tokens):
+    def encode_text(self, tokenized_inputs):
         """Encode text tokens to feature vectors."""
-        return self.model.encode_text(text_tokens)
+        # Unpack the dictionary (input_ids, attention_mask)
+        return self.model.get_text_features(**tokenized_inputs)
     
     def eval(self):
         """Set model to evaluation mode."""

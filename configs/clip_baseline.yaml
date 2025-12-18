@@ -1,8 +1,8 @@
-# CLIP Baseline Configuration
+# CLIP Baseline Configuration (Hugging Face)
 
 model:
-  name: "ViT-B-32"
-  pretrained_tag: "openai"
+  # Changed from "name" to "model_name" to match Python config class
+  model_name: "openai/clip-vit-base-patch32" 
 
 system:
   device: "cuda"

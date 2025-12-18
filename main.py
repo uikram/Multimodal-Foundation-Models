@@ -10,8 +10,10 @@ Usage:
 import argparse
 import warnings
 import torch
+import json
 from pathlib import Path
-from utils.plotting import plot_training_curves
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # Suppress warnings
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", message="The channel dimension is ambiguous")
@@ -20,6 +22,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 from models import get_model
 from utils.config import CLIPConfig, CLIPLoRAConfig, FrozenConfig, load_config_from_yaml
 from utils.helpers import seed_everything
+from torch.utils.data import DataLoader
 from training.train import ModelTrainer
 from evaluation.evaluate import ModelEvaluator
 from evaluation.metrics import MetricsTracker
@@ -104,8 +107,8 @@ def get_models_list(models_arg):
 
 def load_model_checkpoint(model, model_name, config):
     """Load trained checkpoint for evaluation."""
-    import torch  
     from pathlib import Path
+    
     if model_name == 'clip_lora':
         # LoRA saves adapter checkpoints per epoch (epoch_1, epoch_2, epoch_3)
         checkpoint_dir = Path(config.output_dir)
@@ -120,29 +123,24 @@ def load_model_checkpoint(model, model_name, config):
         latest_checkpoint = epoch_dirs[-1]  # Get last epoch (epoch_3)
         print(f"✓ Loading CLIP-LoRA checkpoint from: {latest_checkpoint}")
         
-        # FIX: Load adapter weights directly onto existing PeftModel
-        # model.model is the PeftModel inside CLIPLoRA wrapper
+        # Load adapter weights
         from peft import set_peft_model_state_dict
-        import torch
+        from safetensors.torch import load_file
         
-        # Check for both .safetensors and .bin formats
         adapter_file_safetensors = latest_checkpoint / "adapter_model.safetensors"
         adapter_file_bin = latest_checkpoint / "adapter_model.bin"
         
-        # Load adapter weights (prefer .safetensors if both exist)
         if adapter_file_safetensors.exists():
             print("✓ Loading from .safetensors format")
-            from safetensors.torch import load_file
             adapter_weights = load_file(str(adapter_file_safetensors))
         elif adapter_file_bin.exists():
             print("✓ Loading from .bin format")
             adapter_weights = torch.load(adapter_file_bin, map_location=config.device)
         else:
-            print(f"❌ No adapter_model file found in {latest_checkpoint}")
-            print(f"   Expected: adapter_model.safetensors or adapter_model.bin")
+            print(f"No adapter_model file found in {latest_checkpoint}")
             return model
         
-        # Apply to existing model
+        # Apply to existing model (wrapper.model)
         set_peft_model_state_dict(model.model, adapter_weights)
         print("✓ Loaded LoRA adapter weights")
         
@@ -150,18 +148,17 @@ def load_model_checkpoint(model, model_name, config):
         checkpoint_path = config.checkpoint_dir / "best_model.pt"
         
         if not checkpoint_path.exists():
-            print(f"⚠️  No checkpoint found at {checkpoint_path}")
+            print(f" No checkpoint found at {checkpoint_path}")
             return model
         
         print(f"✓ Loading Frozen checkpoint from: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=config.device)
         
-        # Direct load - architectures match perfectly now!
         model.vision_encoder.load_state_dict(checkpoint['model_state'])
         print(f"✓ Loaded vision encoder with {len(checkpoint['model_state'])} parameters")
-
     
     return model
+
 
 def initialize_model(model_name: str, config_path: str = None):
     """Initialize model with configuration."""
@@ -171,7 +168,6 @@ def initialize_model(model_name: str, config_path: str = None):
     
     # AUTO-LOAD YAML if not provided
     if config_path is None:
-        config_path = f"configs/{model_name}.yaml"
         if model_name == 'clip':
             config_path = "configs/clip_baseline.yaml"
         elif model_name == 'clip_lora':
@@ -179,7 +175,7 @@ def initialize_model(model_name: str, config_path: str = None):
         elif model_name == 'frozen':
             config_path = "configs/frozen_clip.yaml"
     
-    # Load configuration (auto-loads YAML or uses defaults)
+    # Load configuration
     config = load_config_from_yaml(config_path, model_name)
     
     # Initialize model
@@ -195,7 +191,6 @@ def initialize_model(model_name: str, config_path: str = None):
     metrics_tracker.track_parameters(model)
     
     return model, config, metrics_tracker
-
 
 
 def train_model(model, config, metrics_tracker):
@@ -215,57 +210,63 @@ def train_model(model, config, metrics_tracker):
     print("\nTraining completed successfully!")
     metrics_tracker.save_metrics()
     
-    # Generate training curves immediately after training
     try:
         from utils.plotting import plot_training_curves
-        model_name = metrics_tracker.model_name  # Already uppercase
+        model_name = metrics_tracker.model_name
         plot_training_curves(model_name, config.results_dir, Path('plots'))
     except Exception as e:
         print(f"⚠️  Training curve generation failed: {e}")
 
+
 def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
     """
     Evaluate a single model on benchmark datasets.
-    Runs zero-shot, linear probe, and few-shot evaluation.
     """
     print(f"\n{'-'*60}")
     print("Starting Evaluation")
     print(f"{'-'*60}")
 
-    # Use all datasets if not specified
     if datasets_to_eval is None:
         datasets_to_eval = BENCHMARK_DATASETS
 
-    # Import required modules
-    import open_clip
-    from torch.utils.data import DataLoader
-    from datasets.benchmark_datasets import BenchmarkDatasets
+    # Import templates
     from utils.templates import get_templates
 
-    # Move model to device and set to eval mode
     model.to(config.device)
     model.eval()
 
-    # Initialize evaluator
     evaluator = ModelEvaluator(model, config, metrics_tracker)
 
-    # Storage for all results
     all_results = {
         'zero_shot': {},
         'linear_probe': {},
         'few_shot': {}
     }
 
-    # Get preprocessing transform
+    # Determine transform based on model type
     if hasattr(model, 'preprocess'):
+        # For legacy models or if preprocess explicitly set
         transform = model.preprocess
+    elif hasattr(model, 'processor'):
+        # Create transform wrapper for Hugging Face Processor
+        def hf_transform(image):
+            # Processor returns dict with 'pixel_values': tensor(batch, chan, h, w)
+            inputs = model.processor(images=image, return_tensors="pt")
+            return inputs['pixel_values'].squeeze(0)
+        transform = hf_transform
     else:
-        # Default CLIP preprocessing
-        _, _, preprocess = open_clip.create_model_and_transforms(
-            config.model_name if hasattr(config, 'model_name') else 'ViT-B-32',
-            pretrained=config.pretrained_tag if hasattr(config, 'pretrained_tag') else 'openai'
-        )
-        transform = preprocess
+        print("⚠️  No preprocessor found. Attempting default CLIP transform.")
+        try:
+            from torchvision import transforms
+            transform = transforms.Compose([
+                transforms.Resize(224),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize((0.48145466, 0.4578275, 0.40821073), 
+                                  (0.26862954, 0.26130258, 0.27577711))
+            ])
+        except:
+            raise ValueError("Could not determine image transform")
 
     # Evaluate on each dataset
     for dataset_name in datasets_to_eval:
@@ -274,33 +275,33 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
         print(f"{'='*60}")
 
         try:
-            # Get class names and templates
             classnames = get_classnames(dataset_name)
             templates = get_templates(dataset_name)
 
-            # Load datasets
             print(f"Loading {dataset_name} datasets...")
-            train_dataset = load_benchmark_dataset(dataset_name, 'train', transform, config)  # ← Pass config
-            test_dataset = load_benchmark_dataset(dataset_name, 'test', transform, config)  
+            train_dataset = load_benchmark_dataset(dataset_name, 'train', transform, config)
+            test_dataset = load_benchmark_dataset(dataset_name, 'test', transform, config)
                         
-            # Zero-Shot Evaluation (only for CLIP models)
-            if hasattr(model, 'encode_image') and hasattr(model, 'encode_text') and 'frozen' not in config.__class__.__name__.lower():
+            # 1. Zero-Shot Evaluation (CLIP models only)
+            # Check for encode_text capability
+            if hasattr(model, 'encode_text') and 'frozen' not in config.__class__.__name__.lower():
                 print(f"\n[1/3] Zero-Shot Evaluation")
                 try:
                     text_classifier = create_text_classifier(model, classnames, templates, config.device)
                     zs_results = evaluator.zero_shot_evaluation(test_dataset, text_classifier)
-                    all_results['zero_shot'][dataset_name] = zs_results  # Now stores {'top1': 68.5, 'top5': 89.2, 'num_samples': 10000}
-                    print(f"   {dataset_name} Zero-Shot → Top-1: {zs_results['top1']:.2f}% | Top-5: {zs_results['top5']:.2f}%")
+                    all_results['zero_shot'][dataset_name] = zs_results
+                    
                     metrics_tracker.track_performance(
-                                                        accuracy=zs_results['top1'], 
-                                                        top5_accuracy=zs_results['top5'],
-                                                        loss=0.0
-                                                    )
+                        accuracy=zs_results['top1'], 
+                        top5_accuracy=zs_results['top5'],
+                        loss=0.0
+                    )
                 except Exception as e:
                     print(f"✗ Zero-shot failed: {e}")
+                    import traceback
+                    traceback.print_exc()
             else:
-                print("⚠️  Zero-Shot Evaluation skipped (not applicable for Frozen architecture)")
-
+                print("⚠️  Zero-Shot Evaluation skipped (not applicable)")
 
             # 2. Linear Probe Evaluation
             print(f"\n[2/3] Linear Probe Evaluation")
@@ -311,10 +312,7 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
                     'num_samples': lp_samples
                 }
                 print(f"✓ {dataset_name} Linear Probe: {lp_acc:.2f}%")
-
-                # FIX 3: Track performance metrics
                 metrics_tracker.track_performance(accuracy=lp_acc, loss=0.0)
-
             except Exception as e:
                 print(f"✗ Linear probe failed: {e}")
 
@@ -338,7 +336,6 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
     print("Measuring Detailed Inference Latency")
     print(f"{'='*60}")
     try:
-        # Use last test_dataset for latency measurement
         latency_loader = DataLoader(
             test_dataset, 
             batch_size=config.batch_size,
@@ -351,9 +348,6 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
     except Exception as e:
         print(f"⚠️  Latency tracking failed: {e}")
 
-    import json
-    # from datetime import datetime
-    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_file = metrics_tracker.results_dir / f"evaluation_results.json"
     try:
         with open(results_file, 'w') as f:
@@ -369,7 +363,7 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
 
 
 def get_classnames(dataset_name):
-    """Get class names for a dataset - ONLY from templates.py"""
+    """Get class names for a dataset."""
     from utils.templates import (
         CIFAR100_CLASS_NAMES, FOOD101_CLASS_NAMES, FLOWERS102_CLASS_NAMES,
         DESCRIBABLETEXTURES_CLASS_NAMES, EUROSAT_CLASS_NAMES
@@ -393,8 +387,6 @@ def load_benchmark_dataset(dataset_name, split, transform, config):
     from datasets.benchmark_datasets import BenchmarkDatasets
     
     dataset_name_lower = dataset_name.lower()
-    
-    # FIX: Use cache_dir instead of data_root for benchmarks
     cache_dir = config.cache_dir
     
     if dataset_name_lower == 'cifar100':
@@ -412,85 +404,62 @@ def load_benchmark_dataset(dataset_name, split, transform, config):
 
 
 def create_text_classifier(model, classnames, templates, device):
-    """Create text classifier by encoding class names with templates."""
-    import open_clip
-    
+    """
+    Create text classifier by encoding class names with templates.
+    Uses model.tokenize() for compatibility with both HF and OpenCLIP.
+    """
     text_features = []
     
     with torch.no_grad():
         for classname in classnames:
-            # Generate prompts from templates
+            # Generate prompts
             texts = [template.format(classname) for template in templates]
             
-            # Tokenize
-            texts_tokenized = open_clip.tokenize(texts).to(device)
+            # --- UPDATED: Use model's own tokenizer ---
+            # This works for the new CLIPBaseline/CLIPLoRA classes
+            tokenized_inputs = model.tokenize(texts)
             
-            # Encode - returns [num_templates, embedding_dim]
-            class_embeddings = model.encode_text(texts_tokenized)
+            # Encode
+            class_embeddings = model.encode_text(tokenized_inputs)
             
-            # Normalize each embedding
+            # Normalize
             class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
             
-            # Average over templates - returns [embedding_dim]
+            # Average over templates
             class_embedding = class_embeddings.mean(dim=0)
-            
-            # Normalize the averaged embedding
             class_embedding = class_embedding / class_embedding.norm()
             
             text_features.append(class_embedding)
     
-    # Stack all class embeddings: [num_classes, embedding_dim]
+    # Stack: [num_classes, embedding_dim]
     text_classifier = torch.stack(text_features, dim=0).to(device)
     
-    # Transpose for matrix multiplication: [embedding_dim, num_classes]
+    # Transpose for matmul: [embedding_dim, num_classes]
     text_classifier = text_classifier.T
-    
-    # print(f"✓ Text classifier shape: {text_classifier.shape}")  # Debug
     
     return text_classifier
 
 
-
-
 def run_full_pipeline(model_name: str, config_path: str = None, datasets_to_eval=None):
     """Run complete training and evaluation pipeline."""
-    # Initialize
     model, config, metrics_tracker = initialize_model(model_name, config_path)
-    
-    # Train (now saves metrics internally)
     train_model(model, config, metrics_tracker)
-    
-    # Load best checkpoint for evaluation
     model = load_model_checkpoint(model, model_name, config)
-    
-    # Evaluate
     evaluate_model(model, config, metrics_tracker, datasets_to_eval)
-    
-    # Save final evaluation metrics
-    metrics_tracker.save_metrics() 
-    
-    # Print summary
+    metrics_tracker.save_metrics()
     metrics_tracker.print_summary()
 
 
 def main():
     """Main execution function."""
     args = parse_args()
-
-    # Set random seed
     seed_everything(args.seed)
-
-    # Get models list
     models = get_models_list(args.models)
 
     print(f"\n{'='*60}")
     print(f"MULTIMODAL FOUNDATION MODELS - {args.mode.upper()} MODE")
     print(f"{'='*60}")
-    print(f"Models: {', '.join([m.upper() for m in models])}")
-    print(f"Seed: {args.seed}")
-    print(f"{'='*60}\n")
-
-    # Execute for each model
+    
     for model_name in models:
         try:
             if args.mode == 'train':
@@ -500,7 +469,6 @@ def main():
 
             elif args.mode == 'evaluate':
                 model, config, metrics_tracker = initialize_model(model_name, args.config)
-                # Load trained checkpoint
                 model = load_model_checkpoint(model, model_name, config)
                 evaluate_model(model, config, metrics_tracker, args.datasets)
                 metrics_tracker.save_metrics()
@@ -514,11 +482,9 @@ def main():
             traceback.print_exc()
             continue
 
-    # Generate comparison plots if multiple models and not disabled
     if len(models) > 1 and not args.no_plots:
         print(f"\n{'='*60}")
         print("Generating Comparison Plots")
-        print(f"{'='*60}")
         try:
             from utils.plotting import generate_comparison_plots
             generate_comparison_plots(models, Path('results_attained'), Path('plots'))
