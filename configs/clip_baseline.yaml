@@ -15,7 +15,7 @@ data:
   plots_dir: "plots"
 
 evaluation:
-  batch_size: 128
+  batch_size: 64
   logistic_regression_c: 0.316
   k_shots: [1, 2, 4, 8, 16]
 

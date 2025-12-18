@@ -11,6 +11,7 @@ class CLIPLoRA:
         self.config = config
         self.device = config.device
         
+        # --- FIX: Use config.model_id (not model_name) ---
         print(f"Loading CLIP + LoRA: {config.model_id}")
         
         # Load processor
@@ -19,10 +20,11 @@ class CLIPLoRA:
             cache_dir=config.cache_dir
         )
         
-        # Load base model
+        # Load base model with float16
         base_model = CLIPModel.from_pretrained(
-            config.model_id,
-            cache_dir=config.cache_dir
+            config.model_id,  # <--- FIXED (was config.model_name)
+            cache_dir=config.cache_dir,
+            torch_dtype=torch.float16  # <--- Added for speed/memory
         )
         
         # Configure LoRA
@@ -86,9 +88,7 @@ class CLIPLoRA:
     
     def encode_text(self, tokenized_inputs):
         """Encode text using input_ids and attention_mask."""
-        # Support both dictionary input and raw tensors for backward compatibility if needed
         if isinstance(tokenized_inputs, dict):
             return self.model.get_text_features(**tokenized_inputs)
         else:
-            # Fallback if just input_ids passed
             return self.model.get_text_features(input_ids=tokenized_inputs)

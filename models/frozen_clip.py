@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import timm
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from torchvision import transforms
 
 class VisionEncoder(nn.Module):
     """Vision encoder using ResNet-50 with projection."""
@@ -46,10 +47,16 @@ class FrozenCLIP(nn.Module):
         self.config = config
         self.device = config.device
         
-        # Vision encoder (VisionEncoder class - matches OLD code)
+        # Vision encoder
         print(f"Loading vision encoder: {config.vision_encoder_name}...")
         self.vision_encoder = VisionEncoder(config).to(self.device)
-        
+        self.preprocess = transforms.Compose([
+            transforms.Resize(224),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            # Standard ImageNet normalization (Required for ResNet-50)
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
         # Language model
         print(f"Loading LLM: {config.language_model_name}...")
         self.tokenizer = GPT2Tokenizer.from_pretrained(

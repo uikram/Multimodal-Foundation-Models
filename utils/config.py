@@ -54,7 +54,7 @@ class CLIPConfig(BaseConfig):
     # --- CHANGED: Use Hugging Face ID instead of 'ViT-B-32' ---
     model_name: str = "openai/clip-vit-base-patch32"
     
-    batch_size: int = 128
+    batch_size: int = 64
     learning_rate: float = 5e-5
     logistic_regression_c: float = 0.316
     k_shots: List[int] = field(default_factory=lambda: [1, 2, 4, 8, 16])

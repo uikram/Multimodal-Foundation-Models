@@ -12,8 +12,11 @@ class CLIPBaseline:
         
         print(f"Loading CLIP Baseline (Hugging Face): {config.model_name}")
         
-        # Load model and processor from Hugging Face
-        self.model = CLIPModel.from_pretrained(config.model_name)
+        # Load model and processor from Hugging Face with float16
+        self.model = CLIPModel.from_pretrained(
+            config.model_name, 
+            torch_dtype=torch.float16 
+        )
         self.processor = CLIPProcessor.from_pretrained(config.model_name)
         
         self.model.to(self.device)
@@ -34,12 +37,10 @@ class CLIPBaseline:
 
     def encode_image(self, images):
         """Encode images to feature vectors."""
-        # Assuming images are already tensors (pixel_values) from the dataloader
         return self.model.get_image_features(pixel_values=images)
     
     def encode_text(self, tokenized_inputs):
         """Encode text tokens to feature vectors."""
-        # Unpack the dictionary (input_ids, attention_mask)
         return self.model.get_text_features(**tokenized_inputs)
     
     def eval(self):
