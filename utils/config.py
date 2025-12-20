@@ -24,6 +24,7 @@ class BaseConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     num_workers: int = 4
     seed: int = 42
+    debug_mode: bool = False
     
     # Training
     batch_size: int = 8

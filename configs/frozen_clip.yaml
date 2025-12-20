@@ -12,6 +12,7 @@ system:
   num_workers: 4
   seed: 42
   fp16: true
+  debug_mode: False  #Set to true for testing with small dataset
 
 data:
   train_image_dir: "../conceptual_captions_data"

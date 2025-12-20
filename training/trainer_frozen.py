@@ -83,32 +83,46 @@ class FrozenTrainer:
 
             print("\n✅ Training Complete!")
             print(f"Best Validation Loss: {self.best_val_loss:.4f}")
-    
+        
     def get_dataloaders(self):
         """Get training and validation dataloaders."""
         from datasets.dataloaders import FrozenConceptualCaptionsDataset
         from pathlib import Path
+        from torch.utils.data import DataLoader
         
-        # SWAP: image_dir first, then annotation_file!
+        # Check if debug mode is enabled
+        debug_mode = getattr(self.config, 'debug_mode', False)
+        max_samples = 500 if debug_mode else None
+        val_max_samples = 100 if debug_mode else None
+        
+        if debug_mode:
+            print("🔧 DEBUG MODE ENABLED: Training on limited samples")
+        
+        # Create datasets
         train_ds = FrozenConceptualCaptionsDataset(
-            Path(self.config.train_image_dir),  # ← image directory FIRST
-            Path(self.config.train_file),       # ← annotation .jsonl file SECOND
+            Path(self.config.train_image_dir),
+            Path(self.config.train_file),
             self.tokenizer,
-            self.config
+            self.config,
+            debug_mode=debug_mode,
+            max_samples=max_samples
         )
         
         val_ds = FrozenConceptualCaptionsDataset(
-            Path(self.config.val_image_dir),    # ← image directory FIRST
-            Path(self.config.val_file),         # ← annotation .jsonl file SECOND  
+            Path(self.config.val_image_dir),
+            Path(self.config.val_file),
             self.tokenizer,
-            self.config
+            self.config,
+            debug_mode=debug_mode,
+            max_samples=val_max_samples
         )
         
+        # Create dataloaders (disable multiprocessing in debug mode)
         train_loader = DataLoader(
             train_ds,
             batch_size=self.config.batch_size,
             shuffle=True,
-            num_workers=self.config.num_workers,
+            num_workers=0 if debug_mode else self.config.num_workers,
             pin_memory=True
         )
         
@@ -116,11 +130,12 @@ class FrozenTrainer:
             val_ds,
             batch_size=self.config.batch_size,
             shuffle=False,
-            num_workers=self.config.num_workers,
+            num_workers=0 if debug_mode else self.config.num_workers,
             pin_memory=True
         )
         
         return train_loader, val_loader
+
     
     def train_epoch(self, epoch, train_loader):
         """Train for one epoch."""

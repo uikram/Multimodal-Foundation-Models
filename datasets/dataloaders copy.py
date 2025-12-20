@@ -13,25 +13,12 @@ from tqdm import tqdm
 
 Image.MAX_IMAGE_PIXELS = None
 
-# ===== Conceptual Captions Dataset =====
-
-Image.MAX_IMAGE_PIXELS = None
-
+# ===== Conceptual Captions Dataset for CLIP =====
 
 class ConceptualCaptionsDataset(Dataset):
     """
-    Conceptual Captions dataset.
-    
-    Expected structure:
-        conceptual_captions_data/
-        ├── train/              <- images folder
-        │   ├── image1.jpg
-        │   ├── image2.jpg
-        │   └── ...
-        ├── train.jsonl         <- annotations
-        └── validation.jsonl
-    
-    JSONL format: {"filepath": "image1.jpg", "caption": "A cat"}
+    Conceptual Captions dataset for CLIP training.
+    Auto-fixes corrupted JSONL files on-the-fly.
     """
     
     def __init__(self, config, processor):
@@ -51,15 +38,30 @@ class ConceptualCaptionsDataset(Dataset):
         if not self.image_dir.exists():
             raise FileNotFoundError(f"Image directory not found: {self.image_dir}")
         
-        # Parse JSONL
-        with open(annotation_file, 'r') as f:
-            for line_num, line in enumerate(tqdm(f, desc="Loading samples"), 1):
+        # Parse JSONL with robust error handling and line cleaning
+        with open(annotation_file, 'r', encoding='utf-8', errors='ignore') as f:
+            for line_num, raw_line in enumerate(tqdm(f, desc="Loading samples"), 1):
+                # Clean the line
+                line = raw_line.strip()
+                if not line:
+                    continue
+                
                 try:
-                    entry = json.loads(line.strip())
+                    # Try to parse JSON
+                    entry = json.loads(line)
                     
-                    # Get caption and filepath
-                    caption = entry.get("caption") or entry.get("text")
-                    filepath = entry.get("filepath") or entry.get("image_path") or entry.get("file_name")
+                    # Get caption and filepath with flexible key names
+                    caption = (
+                        entry.get("caption") or 
+                        entry.get("text") or 
+                        entry.get("description")
+                    )
+                    filepath = (
+                        entry.get("filepath") or 
+                        entry.get("image_path") or 
+                        entry.get("file_name") or 
+                        entry.get("image")
+                    )
                     
                     if caption and filepath:
                         self.samples.append({
@@ -67,13 +69,13 @@ class ConceptualCaptionsDataset(Dataset):
                             "image_path": filepath
                         })
                 
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
                     if line_num <= 10:
-                        print(f"Warning: Failed to parse line {line_num}")
+                        print(f"  ⚠️  Skipped line {line_num}: {str(e)[:50]}")
                     continue
         
         if len(self.samples) == 0:
-            raise ValueError("No valid samples found!")
+            raise ValueError(f"❌ No valid samples found in {annotation_file}. Check JSON format!")
         
         print(f"✓ Loaded {len(self.samples):,} samples")
     
@@ -81,9 +83,9 @@ class ConceptualCaptionsDataset(Dataset):
         return len(self.samples)
     
     def __getitem__(self, idx):
-        """Get a single sample."""
+        """Get a single sample with retry logic."""
         attempts = 0
-        max_attempts = 10
+        max_attempts = len(self.samples)
         
         while attempts < max_attempts:
             current_idx = (idx + attempts) % len(self.samples)
@@ -94,12 +96,13 @@ class ConceptualCaptionsDataset(Dataset):
             
             try:
                 if not image_path.exists():
-                    raise FileNotFoundError(f"Image not found: {image_path}")
+                    attempts += 1
+                    continue
                 
                 # Load image
                 image = Image.open(image_path).convert("RGB")
                 
-                # Process with CLIP
+                # Process with CLIP processor
                 inputs = self.processor(
                     text=[item["caption"]],
                     images=image,
@@ -116,17 +119,106 @@ class ConceptualCaptionsDataset(Dataset):
                 }
             
             except Exception as e:
-                # if attempts < 3:
-                    # print(f"Warning: Failed to load {image_path}: {e}")
-                # attempts += 1
+                attempts += 1
                 continue
         
-        raise RuntimeError(f"Failed to load sample after {attempts} attempts")
+        raise RuntimeError(f"Failed to load sample after {max_attempts} attempts")
+
+
+# ===== Conceptual Captions Dataset for Frozen Model =====
+
+class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
+    """
+    Dataset for Frozen model training (ResNet50 + GPT-2).
+    Auto-fixes corrupted JSONL files on-the-fly.
+    """
     
+    def __init__(self, image_dir, annotation_file, tokenizer, config):
+        from torchvision import transforms
+        
+        self.image_dir = Path(image_dir)
+        self.tokenizer = tokenizer
+        self.config = config
+        
+        # Image transforms (ResNet normalization)
+        self.transform = transforms.Compose([
+            transforms.Resize((config.image_size, config.image_size)),
+            transforms.ToTensor(),
+            # transforms.Normalize(mean=[0.485, 0.456, 0.406], # Normalization happens in model's self.preprocess
+            #                    std=[0.229, 0.224, 0.225])
+        ])
+        
+        # Load annotations with robust error handling
+        self.samples = []
+        annotation_path = Path(annotation_file)
+        
+        print(f"[FrozenDataset] Loading annotations from: {annotation_path}")
+        print(f"[FrozenDataset] Image directory: {self.image_dir}")
+        
+        if not annotation_path.exists():
+            raise FileNotFoundError(f"Annotation file not found: {annotation_path}")
+        
+        if not self.image_dir.exists():
+            raise FileNotFoundError(f"Image directory not found: {self.image_dir}")
+        
+        # Parse JSONL with on-the-fly corruption fixes
+        error_count = 0
+        with open(annotation_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line_num, raw_line in enumerate(f, 1):
+                # Clean the line
+                line = raw_line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    entry = json.loads(line)
+                    
+                    # Handle flexible key names
+                    caption = (
+                        entry.get("caption") or 
+                        entry.get("text") or 
+                        entry.get("description")
+                    )
+                    
+                    rel_path = (
+                        entry.get("filepath") or 
+                        entry.get("image_path") or 
+                        entry.get("file_name") or
+                        entry.get("image")
+                    )
+                    
+                    if caption and rel_path:
+                        self.samples.append({
+                            "caption": caption,
+                            "image_path": rel_path
+                        })
+                    
+                except json.JSONDecodeError as e:
+                    error_count += 1
+                    if error_count <= 10:
+                        print(f"[FrozenDataset] ⚠️  Skipped line {line_num}: {str(e)[:50]}")
+                    continue
+        
+        if len(self.samples) == 0:
+            raise ValueError(
+                f"❌ No valid samples found in {annotation_path}.\n"
+                f"   Total lines with errors: {error_count}\n"
+                f"   Check JSON format and image paths!"
+            )
+        
+        print(f"[FrozenDataset] ✓ Loaded {len(self.samples):,} samples ({error_count} errors/skipped)")
+        
+        # Verify first image exists
+        first_path = self.image_dir / self.samples[0]["image_path"]
+        if not first_path.exists():
+            print(f"[FrozenDataset] ⚠️  First image not found: {first_path}")
+            print(f"[FrozenDataset]    Using fallback retry logic during training...")
+
     def __len__(self):
         return len(self.samples)
     
     def __getitem__(self, idx):
+        """Get a single sample with intelligent retry logic."""
         attempts = 0
         max_attempts = len(self.samples)
         
@@ -137,151 +229,47 @@ class ConceptualCaptionsDataset(Dataset):
             
             try:
                 if not image_path.exists():
-                    raise FileNotFoundError(f"File not found: {image_path}")
+                    attempts += 1
+                    continue
+                    
+                # Load and transform image
+                image = Image.open(image_path)
+                if image.mode != 'RGB':
+                    image = image.convert("RGB")
+                    
+                image = self.transform(image)
                 
-                image = Image.open(image_path).convert("RGB")
-                
-                inputs = self.processor(
-                    text=[item["caption"]],
-                    images=image,
-                    return_tensors="pt",
+                # Tokenize caption
+                caption_encoded = self.tokenizer(
+                    item["caption"],
+                    max_length=self.config.max_caption_length,
                     padding="max_length",
                     truncation=True,
-                    max_length=self.max_length
+                    return_tensors="pt"
                 )
-                
+
+                input_ids = caption_encoded["input_ids"].squeeze(0)
+                attention_mask = caption_encoded["attention_mask"].squeeze(0)
+
+                # CRITICAL FIX: Mask padding tokens in labels
+                labels = input_ids.clone()
+                labels[attention_mask == 0] = -100  # Tell CrossEntropyLoss to ignore padding
+
                 return {
-                    "pixel_values": inputs["pixel_values"].squeeze(0),
-                    "input_ids": inputs["input_ids"].squeeze(0),
-                    "attention_mask": inputs["attention_mask"].squeeze(0)
+                    "images": image,
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "labels": labels  # ← Now properly masked!
                 }
-            
-            except (OSError, Exception):
+            except Exception as e:
                 attempts += 1
                 continue
         
-        raise RuntimeError(f"Failed to load any images starting from index {idx}")
-
-    # Dataset class
-    class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
-        """Dataset for Frozen model training."""
-        
-        def __init__(self, image_dir, annotation_file, tokenizer, config):
-            self.image_dir = Path(image_dir)
-            self.tokenizer = tokenizer
-            self.config = config
-            
-            # Image transforms
-            self.transform = transforms.Compose([
-                transforms.Resize((config.image_size, config.image_size)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                                   std=[0.229, 0.224, 0.225])
-            ])
-            
-            # Load annotations
-            self.samples = []
-            annotation_path = Path(annotation_file)
-            
-            print(f"Loading annotations from: {annotation_path}")
-            print(f"Image directory: {self.image_dir}")
-            
-            if not annotation_path.exists():
-                raise FileNotFoundError(f"Annotation file not found: {annotation_path}")
-            
-            with open(annotation_path, 'r') as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    try:
-                        entry = json.loads(line)
-                        # Handle flexible key names
-                        caption = (
-                            entry.get("caption") or 
-                            entry.get("text") or 
-                            entry.get("description")
-                        )
-                        
-                        rel_path = (
-                            entry.get("filepath") or 
-                            entry.get("image_path") or 
-                            entry.get("file_name") or
-                            entry.get("image")
-                        )
-                        
-                        if caption and rel_path:
-                            self.samples.append({
-                                "caption": caption,
-                                "image_path": rel_path
-                            })
-                    except json.JSONDecodeError:
-                        continue
-            
-            if len(self.samples) == 0:
-                raise ValueError(f"No valid samples found in {annotation_path}")
-            
-            print(f"✓ Loaded {len(self.samples):,} samples")
-            
-            # Verify first image
-            first_path = self.image_dir / self.samples[0]["image_path"]
-            if not first_path.exists():
-                print(f"⚠️  Warning: First image not found: {first_path}")
-                print(f"   Check if image_dir ({self.image_dir}) is correct")
-
-        def __len__(self):
-            return len(self.samples)
-        
-        def __getitem__(self, idx):
-            # Infinite retry logic
-            attempts = 0
-            max_attempts = len(self.samples)
-            
-            while attempts < max_attempts:
-                current_idx = (idx + attempts) % len(self.samples)
-                item = self.samples[current_idx]
-                image_path = self.image_dir / item["image_path"]
-                
-                try:
-                    if not image_path.exists():
-                        attempts += 1
-                        continue
-                        
-                    image = Image.open(image_path)
-                    if image.mode != 'RGB':
-                        image = image.convert("RGB")
-                        
-                    image = self.transform(image)
-                    
-                    caption_encoded = self.tokenizer(
-                        item["caption"],
-                        max_length=self.config.max_caption_length,
-                        padding="max_length",
-                        truncation=True,
-                        return_tensors="pt"
-                    )
-                    
-                    return {
-                        "images": image,
-                        "input_ids": caption_encoded["input_ids"].squeeze(0),
-                        "attention_mask": caption_encoded["attention_mask"].squeeze(0),
-                        "labels": caption_encoded["input_ids"].squeeze(0)
-                    }
-                except Exception:
-                    attempts += 1
-                    continue
-            
-            # Dummy fallback
-            return {
-                "images": torch.zeros(3, self.config.image_size, self.config.image_size),
-                "input_ids": torch.zeros(self.config.max_caption_length, dtype=torch.long),
-                "attention_mask": torch.zeros(self.config.max_caption_length, dtype=torch.long),
-                "labels": torch.zeros(self.config.max_caption_length, dtype=torch.long)
-            }
+        # Raise error if all attempts fail
+        raise RuntimeError(f"Failed to load sample after {max_attempts} attempts starting from index {idx}")
 
 
-# ===== Dataset Factory =====
+# ===== Dataset Factory for Benchmark Datasets =====
 
 class DatasetFactory:
     """Factory for loading benchmark datasets."""
@@ -351,11 +339,10 @@ class DatasetFactory:
         }
 
 
+# ===== Dataloader Functions =====
+
 def get_conceptual_captions_loader(config, processor):
     """Get Conceptual Captions dataloader for CLIP+LoRA."""
-    from datasets.conceptual_captions import ConceptualCaptionsDataset
-    from torch.utils.data import DataLoader
-    
     dataset = ConceptualCaptionsDataset(config, processor)
     
     loader = DataLoader(
@@ -372,74 +359,13 @@ def get_conceptual_captions_loader(config, processor):
 def get_frozen_dataset_loader(config):
     """Get Conceptual Captions dataloaders for Frozen model."""
     from transformers import GPT2Tokenizer
-    from torch.utils.data import DataLoader
-    import torch
     
     # Initialize tokenizer
     tokenizer = GPT2Tokenizer.from_pretrained(config.language_model_name)
     tokenizer.pad_token = tokenizer.eos_token
     
-    # Create datasets
-    class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
-        """Dataset for Frozen model training."""
-        
-        def __init__(self, image_dir, annotation_file, tokenizer, config):
-            import json
-            from pathlib import Path
-            from PIL import Image
-            import torchvision.transforms as transforms
-            
-            self.image_dir = Path(image_dir)
-            self.tokenizer = tokenizer
-            self.config = config
-            
-            # Image transforms
-            self.transform = transforms.Compose([
-                transforms.Resize((config.image_size, config.image_size)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
-            
-            # Load annotations
-            self.samples = []
-            with open(annotation_file, 'r') as f:
-                for line in f:
-                    entry = json.loads(line.strip())
-                    caption = entry.get("caption") or entry.get("text")
-                    filepath = entry.get("filepath") or entry.get("image_path")
-                    if caption and filepath:
-                        self.samples.append({"caption": caption, "image_path": filepath})
-        
-        def __len__(self):
-            return len(self.samples)
-        
-        def __getitem__(self, idx):
-            from PIL import Image
-            
-            item = self.samples[idx]
-            image_path = self.image_dir / item["image_path"]
-            
-            # Load image
-            image = Image.open(image_path).convert("RGB")
-            image = self.transform(image)
-            
-            # Tokenize caption
-            caption_encoded = self.tokenizer(
-                item["caption"],
-                max_length=self.config.max_caption_length,
-                padding="max_length",
-                truncation=True,
-                return_tensors="pt"
-            )
-            
-            return {
-                "images": image,
-                "input_ids": caption_encoded["input_ids"].squeeze(0),
-                "attention_mask": caption_encoded["attention_mask"].squeeze(0),
-                "labels": caption_encoded["input_ids"].squeeze(0)
-            }
-    
-    # Create train and val datasets
+    print("[FrozenDataLoader] Initializing training dataset...")
+    # Create train dataset
     train_dataset = FrozenConceptualCaptionsDataset(
         config.train_image_dir,
         config.train_file,
@@ -447,6 +373,8 @@ def get_frozen_dataset_loader(config):
         config
     )
     
+    print("[FrozenDataLoader] Initializing validation dataset...")
+    # Create val dataset
     val_dataset = FrozenConceptualCaptionsDataset(
         config.val_image_dir,
         config.val_file,
@@ -454,12 +382,14 @@ def get_frozen_dataset_loader(config):
         config
     )
     
+    # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True  # Drop incomplete batches
     )
     
     val_loader = DataLoader(
@@ -467,7 +397,10 @@ def get_frozen_dataset_loader(config):
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        drop_last=False
     )
+    
+    print(f"[FrozenDataLoader] ✓ Train: {len(train_loader)} batches | Val: {len(val_loader)} batches")
     
     return train_loader, val_loader
