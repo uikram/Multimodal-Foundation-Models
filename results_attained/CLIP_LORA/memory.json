@@ -1,0 +1,9 @@
+{
+    "pre_training_peak_gpu_mb": 299.79052734375,
+    "pre_training_current_gpu_mb": 299.79052734375,
+    "cpu_memory_mb": 4455.6484375,
+    "post_training_peak_gpu_mb": 2649.00048828125,
+    "post_training_current_gpu_mb": 371.720703125,
+    "inference_peak_gpu_mb": 445.80078125,
+    "inference_current_gpu_mb": 356.61279296875
+}

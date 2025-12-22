@@ -150,14 +150,12 @@ class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
         self.tokenizer = tokenizer
         self.config = config
         self.debug_mode = debug_mode
-        
-        # ✅ FIX: Image transforms WITHOUT normalization (done in model)
+
         self.transform = transforms.Compose([
             transforms.Resize((config.image_size, config.image_size)),
-            transforms.ToTensor()
-            # Normalization happens in model.preprocess
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
-        
         # Load annotations with robust error handling
         self.samples = []
         annotation_path = Path(annotation_file)
