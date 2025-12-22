@@ -185,8 +185,7 @@ class FrozenTrainer:
             else:
                 self.optimizer.step()
             self.optimizer.zero_grad()
-        
-        self.global_step += 1
+            self.global_step += 1
         
         return loss.item() * self.config.gradient_accumulation_steps
     
