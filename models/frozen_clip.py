@@ -50,11 +50,12 @@ class FrozenCLIP(nn.Module):
         # Vision encoder
         print(f"Loading vision encoder: {config.vision_encoder_name}...")
         self.vision_encoder = VisionEncoder(config).to(self.device)
+        # FIX: Match old evaluation transform (Bicubic Interpolation)
+        from torchvision.transforms import InterpolationMode
         self.preprocess = transforms.Compose([
-            transforms.Resize(224),
+            transforms.Resize(224, interpolation=InterpolationMode.BICUBIC),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
-            # Standard ImageNet normalization (Required for ResNet-50)
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         # Language model
@@ -128,13 +129,27 @@ class FrozenCLIP(nn.Module):
         
         return logits, loss
     
+    # def encode_image(self, images):
+    #     """Encode images to feature vectors for evaluation."""
+    #     self.vision_encoder.eval()
+    #     with torch.no_grad():
+    #         # Get features from backbone
+    #         features = self.vision_encoder.backbone(images)
+    #         features = self.vision_encoder.pool(features).flatten(1)
+    #         features = features / features.norm(dim=-1, keepdim=True)
+    #     return features
+
     def encode_image(self, images):
         """Encode images to feature vectors for evaluation."""
         self.vision_encoder.eval()
         with torch.no_grad():
-            # Get features from backbone
-            features = self.vision_encoder.backbone(images)
-            features = self.vision_encoder.pool(features).flatten(1)
+            # CORRECTION: Call the module directly to include Projection Layer
+            features = self.vision_encoder(images) 
+            
+            # CORRECTION: Flatten [Batch, Prefix_Len, Dim] -> [Batch, Features]
+            if features.dim() == 3:
+                features = features.flatten(start_dim=1)
+                
             features = features / features.norm(dim=-1, keepdim=True)
         return features
     

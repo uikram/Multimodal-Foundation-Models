@@ -82,7 +82,7 @@ class ModelEvaluator:
             C=C,
             max_iter=1000,
             verbose=1,
-            n_jobs=-1,
+            n_jobs=1,
             solver='lbfgs'
         )
         classifier.fit(train_features, train_labels)
@@ -240,7 +240,7 @@ class ModelEvaluator:
                     C=C,
                     max_iter=1000,
                     verbose=0,
-                    n_jobs=-1,
+                    n_jobs=1,
                     solver='lbfgs'
                 )
                 clf.fit(k_features, k_labels)

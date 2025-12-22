@@ -233,7 +233,7 @@ def train_model(model, config, metrics_tracker):
         model_name = metrics_tracker.model_name
         plot_training_curves(model_name, config.results_dir, Path('plots'))
     except Exception as e:
-        print(f"⚠️  Training curve generation failed: {e}")
+        print(f"Training curve generation failed: {e}")
 
 
 def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
@@ -273,7 +273,7 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
             return inputs['pixel_values'].squeeze(0)
         transform = hf_transform
     else:
-        print("⚠️  No preprocessor found. Attempting default CLIP transform.")
+        print("No preprocessor found. Attempting default CLIP transform.")
         try:
             from torchvision import transforms
             transform = transforms.Compose([
@@ -319,7 +319,7 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
                     import traceback
                     traceback.print_exc()
             else:
-                print("⚠️  Zero-Shot Evaluation skipped (not applicable)")
+                print("Zero-Shot Evaluation skipped for Frozen")
 
             # 2. Linear Probe Evaluation
             print(f"\n[2/3] Linear Probe Evaluation")
@@ -329,10 +329,10 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
                     'accuracy': lp_acc,
                     'num_samples': lp_samples
                 }
-                print(f"✓ {dataset_name} Linear Probe: {lp_acc:.2f}%")
+                print(f"{dataset_name} Linear Probe: {lp_acc:.2f}%")
                 metrics_tracker.track_performance(accuracy=lp_acc, loss=0.0)
             except Exception as e:
-                print(f"✗ Linear probe failed: {e}")
+                print(f"Linear probe failed: {e}")
 
             # 3. Few-Shot Evaluation
             print(f"\n[3/3] Few-Shot Evaluation")
@@ -340,12 +340,12 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
                 k_shots = config.k_shots if hasattr(config, 'k_shots') else [1, 2, 4, 8, 16]
                 fs_results = evaluator.few_shot_evaluation(train_dataset, test_dataset, k_shots)
                 all_results['few_shot'][dataset_name] = fs_results
-                print(f"✓ {dataset_name} Few-Shot: {fs_results}")
+                print(f"{dataset_name} Few-Shot: {fs_results}")
             except Exception as e:
-                print(f"✗ Few-shot failed: {e}")
+                print(f"Few-shot failed: {e}")
 
         except Exception as e:
-            print(f"✗ Failed to evaluate {dataset_name}: {e}")
+            print(f"Failed to evaluate {dataset_name}: {e}")
             import traceback
             traceback.print_exc()
             continue
@@ -362,17 +362,17 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
             pin_memory=True
         )
         metrics_tracker.track_inference_latency(model, latency_loader, num_samples=100)
-        print("✓ Latency metrics recorded")
+        print("Latency metrics recorded")
     except Exception as e:
-        print(f"⚠️  Latency tracking failed: {e}")
+        print(f"Latency tracking failed: {e}")
 
     results_file = metrics_tracker.results_dir / f"evaluation_results.json"
     try:
         with open(results_file, 'w') as f:
             json.dump(all_results, f, indent=4)
-        print(f"\n✓ Saved evaluation results to {results_file}")
+        print(f"\nSaved evaluation results to {results_file}")
     except Exception as e:
-        print(f"⚠️  Failed to save evaluation results: {e}")
+        print(f"Failed to save evaluation results: {e}")
 
     print("\n" + "="*60)
     print("Evaluation completed successfully!")
@@ -495,7 +495,7 @@ def main():
                 run_full_pipeline(model_name, args.config, args.datasets)
 
         except Exception as e:
-            print(f"\n❌ ERROR with {model_name}: {e}")
+            print(f"\nERROR with {model_name}: {e}")
             import traceback
             traceback.print_exc()
             continue
@@ -507,7 +507,7 @@ def main():
             from utils.plotting import generate_comparison_plots
             generate_comparison_plots(models, Path('results_attained'), Path('plots'))
         except Exception as e:
-            print(f"⚠️  Plot generation failed: {e}")
+            print(f"Plot generation failed: {e}")
 
     print(f"\n{'='*60}")
     print("All tasks completed successfully!")

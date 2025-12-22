@@ -21,12 +21,13 @@ class FrozenTrainer:
         self.tokenizer = GPT2Tokenizer.from_pretrained(config.language_model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # Optimizer (only vision encoder parameters)
+        # Optimizer (Vision Encoder only)
         self.optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay
-        )
+                                        self.model.vision_encoder.parameters(),
+                                        lr=config.learning_rate,
+                                        weight_decay=config.weight_decay
+                                        )
+
         
         # Mixed precision scaler
         self.scaler = torch.cuda.amp.GradScaler() if config.fp16 else None
