@@ -12,7 +12,7 @@ class CLIPLoRA:
         self.device = config.device
         
         # --- FIX: Use config.model_id (not model_name) ---
-        print(f"Loading CLIP + LoRA: {config.model_id}")
+        print(f"Loading CLIP + LoRA (Hugging Face): {config.model_id}")
         
         # Load processor
         self.processor = CLIPProcessor.from_pretrained(

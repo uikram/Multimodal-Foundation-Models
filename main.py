@@ -237,9 +237,7 @@ def train_model(model, config, metrics_tracker):
 
 
 def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
-    """
-    Evaluate a single model on benchmark datasets.
-    """
+    """Evaluate a single model on benchmark datasets."""
     print(f"\n{'-'*60}")
     print("Starting Evaluation")
     print(f"{'-'*60}")
@@ -247,7 +245,6 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
     if datasets_to_eval is None:
         datasets_to_eval = BENCHMARK_DATASETS
 
-    # Import templates
     from utils.templates import get_templates
 
     model.to(config.device)
@@ -255,36 +252,21 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
 
     evaluator = ModelEvaluator(model, config, metrics_tracker)
 
-    all_results = {
-        'zero_shot': {},
-        'linear_probe': {},
-        'few_shot': {}
-    }
-
-    # Determine transform based on model type
-    if hasattr(model, 'preprocess'):
-        # For legacy models or if preprocess explicitly set
-        transform = model.preprocess
-    elif hasattr(model, 'processor'):
-        # Create transform wrapper for Hugging Face Processor
+    # Determine transform
+    if hasattr(model, 'processor'):
         def hf_transform(image):
-            # Processor returns dict with 'pixel_values': tensor(batch, chan, h, w)
             inputs = model.processor(images=image, return_tensors="pt")
             return inputs['pixel_values'].squeeze(0)
         transform = hf_transform
     else:
-        print("No preprocessor found. Attempting default CLIP transform.")
-        try:
-            from torchvision import transforms
-            transform = transforms.Compose([
-                transforms.Resize(224),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize((0.48145466, 0.4578275, 0.40821073), 
-                                  (0.26862954, 0.26130258, 0.27577711))
-            ])
-        except:
-            raise ValueError("Could not determine image transform")
+        from torchvision import transforms
+        transform = transforms.Compose([
+            transforms.Resize(224),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), 
+                              (0.26862954, 0.26130258, 0.27577711))
+        ])
 
     # Evaluate on each dataset
     for dataset_name in datasets_to_eval:
@@ -301,23 +283,23 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
             test_dataset = load_benchmark_dataset(dataset_name, 'test', transform, config)
                         
             # 1. Zero-Shot Evaluation (CLIP models only)
-            # Check for encode_text capability
             if hasattr(model, 'encode_text') and 'frozen' not in config.__class__.__name__.lower():
                 print(f"\n[1/3] Zero-Shot Evaluation")
                 try:
                     text_classifier = create_text_classifier(model, classnames, templates, config.device)
                     zs_results = evaluator.zero_shot_evaluation(test_dataset, text_classifier)
-                    all_results['zero_shot'][dataset_name] = zs_results
                     
-                    metrics_tracker.track_performance(
-                        accuracy=zs_results['top1'], 
-                        top5_accuracy=zs_results['top5'],
-                        loss=0.0
+                    metrics_tracker.track_evaluation_results(
+                        dataset_name=dataset_name,
+                        task='zero_shot',
+                        results={
+                            'top1_accuracy': float(zs_results['top1']),
+                            'top5_accuracy': float(zs_results['top5'])
+                        }
                     )
+                    print(f"✓ Zero-shot: Top-1={zs_results['top1']:.2f}%, Top-5={zs_results['top5']:.2f}%")
                 except Exception as e:
                     print(f"✗ Zero-shot failed: {e}")
-                    import traceback
-                    traceback.print_exc()
             else:
                 print("Zero-Shot Evaluation skipped for Frozen")
 
@@ -325,24 +307,41 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
             print(f"\n[2/3] Linear Probe Evaluation")
             try:
                 lp_acc, lp_samples = evaluator.linear_probe_evaluation(train_dataset, test_dataset)
-                all_results['linear_probe'][dataset_name] = {
-                    'accuracy': lp_acc,
-                    'num_samples': lp_samples
-                }
-                print(f"{dataset_name} Linear Probe: {lp_acc:.2f}%")
-                metrics_tracker.track_performance(accuracy=lp_acc, loss=0.0)
+                
+                metrics_tracker.track_evaluation_results(
+                    dataset_name=dataset_name,
+                    task='linear_probe',
+                    results={
+                        'accuracy': float(lp_acc),
+                        'num_samples': int(lp_samples)
+                    }
+                )
+                print(f"✓ Linear Probe: {lp_acc:.2f}%")
             except Exception as e:
-                print(f"Linear probe failed: {e}")
+                print(f"✗ Linear probe failed: {e}")
 
-            # 3. Few-Shot Evaluation
+            # 3. Few-Shot Evaluation (SHOULD ONLY BE HERE ONCE!)
             print(f"\n[3/3] Few-Shot Evaluation")
             try:
                 k_shots = config.k_shots if hasattr(config, 'k_shots') else [1, 2, 4, 8, 16]
-                fs_results = evaluator.few_shot_evaluation(train_dataset, test_dataset, k_shots)
-                all_results['few_shot'][dataset_name] = fs_results
-                print(f"{dataset_name} Few-Shot: {fs_results}")
+                
+                fs_results = evaluator.few_shot_evaluation(
+                    train_dataset, 
+                    test_dataset, 
+                    k_shots,
+                    num_trials=3
+                )
+                
+                metrics_tracker.track_evaluation_results(
+                    dataset_name=dataset_name,
+                    task='few_shot',
+                    results=fs_results
+                )
+                print(f"✓ Few-Shot completed")
             except Exception as e:
-                print(f"Few-shot failed: {e}")
+                print(f"✗ Few-shot failed: {e}")
+                import traceback
+                traceback.print_exc()
 
         except Exception as e:
             print(f"Failed to evaluate {dataset_name}: {e}")
@@ -350,34 +349,26 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
             traceback.print_exc()
             continue
 
+    # Measure latency ONCE at the end (not per dataset)
     print(f"\n{'='*60}")
     print("Measuring Detailed Inference Latency")
     print(f"{'='*60}")
     try:
+        from torch.utils.data import DataLoader
         latency_loader = DataLoader(
-            test_dataset, 
+            test_dataset,  # Uses last test_dataset loaded
             batch_size=config.batch_size,
             shuffle=False,
             num_workers=config.num_workers,
             pin_memory=True
         )
         metrics_tracker.track_inference_latency(model, latency_loader, num_samples=100)
-        print("Latency metrics recorded")
     except Exception as e:
         print(f"Latency tracking failed: {e}")
-
-    results_file = metrics_tracker.results_dir / f"evaluation_results.json"
-    try:
-        with open(results_file, 'w') as f:
-            json.dump(all_results, f, indent=4)
-        print(f"\nSaved evaluation results to {results_file}")
-    except Exception as e:
-        print(f"Failed to save evaluation results: {e}")
 
     print("\n" + "="*60)
     print("Evaluation completed successfully!")
     print("="*60)
-    return all_results
 
 
 def get_classnames(dataset_name):
@@ -467,6 +458,97 @@ def run_full_pipeline(model_name: str, config_path: str = None, datasets_to_eval
     metrics_tracker.save_metrics()
     metrics_tracker.print_summary()
 
+def prepare_lora_model_for_evaluation(config):
+    """
+    Prepare LoRA model for evaluation by merging adapters if needed.
+    Ensures fair comparison by removing adapter hook overhead.
+    
+    Args:
+        config: CLIPLoRAConfig instance
+        
+    Returns:
+        Path to merged model or None if merge failed
+    """
+    from utils.model_merger import LoRAModelMerger
+    
+    merged_model_dir = Path(config.output_dir) / "merged_model"
+    
+    # Check if merged model already exists
+    if merged_model_dir.exists() and (merged_model_dir / "pytorch_model.bin").exists():
+        print(f"✅ Merged CLIP+LoRA model already exists at: {merged_model_dir}")
+        return merged_model_dir
+    
+    # Find latest LoRA checkpoint
+    try:
+        latest_checkpoint = LoRAModelMerger.find_latest_lora_checkpoint(
+            Path(config.output_dir)
+        )
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        return None
+    
+    # Merge adapters into base model
+    try:
+        merged_dir = LoRAModelMerger.merge_and_save_lora(
+            base_model_id=config.model_id,
+            lora_checkpoint_dir=latest_checkpoint,
+            output_dir=merged_model_dir,
+            cache_dir=config.cache_dir
+        )
+        return merged_dir
+    except Exception as e:
+        print(f"❌ Failed to merge LoRA adapters: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def load_model_for_evaluation(model_name: str, config):
+    """
+    Load model for evaluation with proper handling of merged LoRA.
+    
+    Args:
+        model_name: Model identifier (clip, clip_lora, frozen)
+        config: Model configuration
+        
+    Returns:
+        Loaded model instance
+    """
+    if model_name == 'clip_lora':
+        # Try to load merged model first
+        merged_dir = prepare_lora_model_for_evaluation(config)
+        
+        if merged_dir and merged_dir.exists():
+            print(f"\n🔄 Loading merged CLIP+LoRA for evaluation...")
+            from models.clip_baseline import CLIPBaseline
+            
+            # Create a temporary config for the merged model
+            import copy
+            merged_config = copy.deepcopy(config)
+            merged_config.model_id = str(merged_dir)
+            
+            # Load as standard CLIP (no LoRA hooks)
+            model = CLIPBaseline(merged_config)
+            print("✅ Loaded merged model (adapter weights baked in)")
+            return model
+        else:
+            print("\n⚠️  Warning: Could not load merged model, falling back to LoRA with hooks")
+            print("   (This may affect latency measurements)")
+            from models.clip_lora import CLIPLoRA
+            model = CLIPLoRA(config)
+            return load_model_checkpoint(model, model_name, config)
+    
+    elif model_name == 'clip':
+        from models.clip_baseline import CLIPBaseline
+        return CLIPBaseline(config)
+    
+    elif model_name == 'frozen':
+        from models.frozen_clip import FrozenCLIP
+        model = FrozenCLIP(config)
+        return load_model_checkpoint(model, model_name, config)
+    
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
+
 
 def main():
     """Main execution function."""
@@ -487,9 +569,10 @@ def main():
 
             elif args.mode == 'evaluate':
                 model, config, metrics_tracker = initialize_model(model_name, args.config)
-                model = load_model_checkpoint(model, model_name, config)
+                model = load_model_for_evaluation(model_name, config)  # ← CHANGED
                 evaluate_model(model, config, metrics_tracker, args.datasets)
                 metrics_tracker.save_metrics()
+
 
             elif args.mode == 'full_pipeline':
                 run_full_pipeline(model_name, args.config, args.datasets)

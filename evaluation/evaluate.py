@@ -1,29 +1,33 @@
 """
-Unified evaluation pipeline for all models.
+Model evaluation module with zero-shot, few-shot, and linear probe evaluation.
 """
 
 import torch
 import numpy as np
-from tqdm import tqdm
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 from sklearn.linear_model import LogisticRegression
-from .metrics import MetricsTracker
-import time
+from sklearn.metrics import accuracy_score
 
 
 class ModelEvaluator:
-    """Unified evaluator for all model types."""
-
-    def __init__(self, model, config, metrics_tracker: MetricsTracker):
+    """Evaluator for multimodal foundation models."""
+    
+    def __init__(self, model, config, metrics):
         self.model = model
         self.config = config
-        self.metrics = metrics_tracker
-        self.device = config.device
-
-    def extract_features(self, dataset):
+        self.metrics = metrics
+        
+    def _extract_features(self, dataset):
         """
-        Extract features from a dataset using the model's image encoder.
-        Returns features and labels as numpy arrays.
+        Extract image features from a dataset.
+        
+        Args:
+            dataset: PyTorch dataset
+            
+        Returns:
+            features: numpy array of shape [N, feature_dim]
+            labels: numpy array of shape [N]
         """
         dataloader = DataLoader(
             dataset,
@@ -32,229 +36,258 @@ class ModelEvaluator:
             num_workers=self.config.num_workers,
             pin_memory=True
         )
-
+        
         all_features = []
         all_labels = []
-
+        
         self.model.eval()
+        
         with torch.no_grad():
-            for images, labels in tqdm(dataloader, desc="Extracting features"):
-                images = images.to(self.device)
-
-                # Encode images
-                features = self.model.encode_image(images)
-
+            for batch in tqdm(dataloader, desc="Extracting features"):
+                # Handle different batch formats
+                if isinstance(batch, (list, tuple)):
+                    images, labels = batch
+                elif isinstance(batch, dict):
+                    images = batch['images']
+                    labels = batch['labels']
+                else:
+                    images = batch
+                    labels = None
+                
+                images = images.to(self.config.device)
+                
+                # Extract features
+                if hasattr(self.model, 'encode_image'):
+                    features = self.model.encode_image(images)
+                else:
+                    features = self.model(images)
+                
                 # Normalize features
                 features = features / features.norm(dim=-1, keepdim=True)
-
-                all_features.append(features.cpu())
-                all_labels.append(labels)
-
-        # Concatenate all batches
-        if not all_features:
-            return np.array([]), np.array([])
+                
+                all_features.append(features.cpu().numpy())
+                
+                if labels is not None:
+                    all_labels.append(labels.numpy())
+        
+        features = np.vstack(all_features)
+        labels = np.concatenate(all_labels) if all_labels else None
+        
+        return features, labels
+    
+    def zero_shot_evaluation(self, test_dataset, text_classifier):
+        """
+        Zero-shot evaluation using pre-computed text classifier.
+        
+        Args:
+            test_dataset: Test dataset
+            text_classifier: Pre-computed text embeddings [embedding_dim, num_classes]
             
-        all_features = torch.cat(all_features, dim=0).numpy()
-        all_labels = torch.cat(all_labels, dim=0).numpy()
-
-        return all_features, all_labels
-
-    def linear_probe_evaluation(self, train_dataset, test_dataset):
-        """Perform linear probe evaluation with timing."""
-        # Start overall evaluation timer
+        Returns:
+            Dictionary with top-1 and top-5 accuracies
+        """
         self.metrics.start_evaluation_timer()
-
-        print("Extracting training features...")
-        train_features, train_labels = self.extract_features(train_dataset)
-
-        print("Extracting test features...")
-        # Start inference timer specifically for test set
-        self.metrics.start_inference_timer()
-        test_features, test_labels = self.extract_features(test_dataset)
-        self.metrics.end_inference_timer()
-
-        print("Training logistic regression...")
-        # Get logistic regression C parameter
-        C = getattr(self.config, 'logistic_regression_c', 0.316)
-
-        classifier = LogisticRegression(
-            random_state=0,
-            C=C,
-            max_iter=1000,
-            verbose=1,
-            n_jobs=1,
-            solver='lbfgs'
-        )
-        classifier.fit(train_features, train_labels)
-
-        print("Evaluating...")
-        predictions = classifier.predict(test_features)
-        accuracy = np.mean((test_labels == predictions).astype(float)) * 100.0
-
-        # End overall evaluation timer
-        self.metrics.end_evaluation_timer()
-
-        # Track classification report
-        self.metrics.track_classification_report(test_labels, predictions)
-
-        return accuracy, len(test_labels)
-
-    def calculate_top_k_accuracy(self, logits, labels, k=5):
-        """Calculate Top-K accuracy."""
-        # Get top-k predictions
-        _, top_k_preds = logits.topk(k, dim=1, largest=True, sorted=True)
         
-        # Check if true label is in top-k
-        labels = labels.view(-1, 1).expand_as(top_k_preds)
-        correct = (top_k_preds == labels).any(dim=1).float()
-        
-        return correct.mean().item() * 100.0
-
-    def zero_shot_evaluation(self, dataset, text_classifier):
-        """Perform zero-shot evaluation with Top-1 and Top-5 accuracy."""
-        # Start overall evaluation timer
-        self.metrics.start_evaluation_timer()
-
-        dataloader = DataLoader(
-            dataset,
+        test_loader = DataLoader(
+            test_dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
             num_workers=self.config.num_workers,
             pin_memory=True
         )
         
-        all_logits = []  
         all_predictions = []
         all_labels = []
-
-        # Track pure inference time
-        inference_times = []
-
+        all_top5_predictions = []
+        
         self.model.eval()
+        
         with torch.no_grad():
-            for images, labels in tqdm(dataloader, desc="Zero-Shot Eval"):
-                images = images.to(self.device)
-                labels = labels.to(self.device)
-
-                # Time pure inference
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                inference_start = time.time()
-
+            for batch in tqdm(test_loader, desc="Zero-shot evaluation"):
+                if isinstance(batch, (list, tuple)):
+                    images, labels = batch
+                else:
+                    images = batch['images']
+                    labels = batch['labels']
+                
+                images = images.to(self.config.device)
+                
+                # Get image features
                 image_features = self.model.encode_image(images)
-                image_features /= image_features.norm(dim=-1, keepdim=True)
-
-                # text_classifier is already on device and normalized
-                logits = (100.0 * image_features @ text_classifier)
+                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                 
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                inference_times.append(time.time() - inference_start)
-
-                # Store logits for Top-5 calculation
-                all_logits.append(logits.cpu())
+                # Compute similarity with text classifier
+                logits = image_features @ text_classifier  # [batch_size, num_classes]
                 
-                # Get Top-1 predictions
-                _, predictions = logits.max(1)
-                all_predictions.append(predictions.cpu())
-                all_labels.append(labels.cpu())
-
-        # End overall evaluation timer
+                # Top-1 predictions
+                predictions = logits.argmax(dim=1).cpu().numpy()
+                all_predictions.extend(predictions)
+                
+                # Top-5 predictions
+                top5_pred = torch.topk(logits, k=5, dim=1)[1].cpu().numpy()
+                all_top5_predictions.extend(top5_pred)
+                
+                all_labels.extend(labels.numpy())
+        
         self.metrics.end_evaluation_timer()
-
-        # Record inference time
-        if inference_times:
-            total_inference_time = sum(inference_times)
-            self.metrics.metrics['inference_time'] = {
-                'total_seconds': total_inference_time,
-                'total_minutes': total_inference_time / 60,
-                'total_hours': total_inference_time / 3600,
-                'average_per_batch_ms': (total_inference_time / len(inference_times)) * 1000
-            }
-
-        # Concatenate all batches
-        if not all_logits:
-             return {'top1': 0.0, 'top5': 0.0, 'num_samples': 0}
-
-        all_logits = torch.cat(all_logits)
-        all_predictions = torch.cat(all_predictions)
-        all_labels = torch.cat(all_labels)
         
-        # Calculate Top-1 Accuracy
-        top1_accuracy = np.mean((all_labels.numpy() == all_predictions.numpy()).astype(float)) * 100.0
+        # Calculate accuracies
+        all_predictions = np.array(all_predictions)
+        all_labels = np.array(all_labels)
         
-        # Calculate Top-5 Accuracy
-        num_classes = all_logits.size(1)
-        if num_classes >= 5:
-            top5_accuracy = self.calculate_top_k_accuracy(all_logits, all_labels, k=5)
-        else:
-            top5_accuracy = top1_accuracy
-            print(f"⚠️  Dataset has only {num_classes} classes. Top-5 = Top-1")
-
-        # Print results
-        print(f"✓ Top-1 Accuracy: {top1_accuracy:.2f}%")
-        print(f"✓ Top-5 Accuracy: {top5_accuracy:.2f}%")
-
-        # Track classification report
-        self.metrics.track_classification_report(all_labels.numpy(), all_predictions.numpy())
-
-        return {
-            'top1': top1_accuracy,
-            'top5': top5_accuracy,
-            'num_samples': len(all_labels)
+        top1_acc = accuracy_score(all_labels, all_predictions) * 100
+        
+        # Top-5 accuracy
+        top5_correct = sum([1 for i, label in enumerate(all_labels) 
+                           if label in all_top5_predictions[i]])
+        top5_acc = (top5_correct / len(all_labels)) * 100
+        
+        results = {
+            'top1': top1_acc,
+            'top5': top5_acc
         }
-
-    def few_shot_evaluation(self, train_dataset, test_dataset, k_shots):
-        """Perform few-shot evaluation."""
-        print("Caching features for few-shot...")
-        train_features, train_labels = self.extract_features(train_dataset)
-        test_features, test_labels = self.extract_features(test_dataset)
-
-        results = {}
-        unique_classes = np.unique(train_labels)
         
-        # Get logistic regression C parameter
-        C = getattr(self.config, 'logistic_regression_c', 0.316)
-
+        return results
+    
+    def linear_probe_evaluation(self, train_dataset, test_dataset):
+        """
+        Linear probe evaluation using entire training dataset.
+        
+        Args:
+            train_dataset: Training dataset
+            test_dataset: Test dataset
+            
+        Returns:
+            accuracy: Test accuracy
+            num_samples: Number of test samples
+        """
+        print("Extracting training features...")
+        train_features, train_labels = self._extract_features(train_dataset)
+        
+        print("Extracting test features...")
+        test_features, test_labels = self._extract_features(test_dataset)
+        
+        self.metrics.start_inference_timer()
+        
+        # Train logistic regression
+        classifier = LogisticRegression(
+            max_iter=1000,
+            random_state=42,
+            C=1.0,
+            solver='lbfgs',
+            n_jobs=-1,
+            verbose=0
+        )
+        
+        print("Training linear classifier...")
+        classifier.fit(train_features, train_labels)
+        
+        # Evaluate
+        predictions = classifier.predict(test_features)
+        accuracy = accuracy_score(test_labels, predictions) * 100
+        
+        self.metrics.end_inference_timer()
+        
+        return accuracy, len(test_dataset)
+    
+    def few_shot_evaluation(self, train_dataset, test_dataset, k_shots=[1, 2, 4, 8, 16], num_trials=3):
+        """
+        Few-shot evaluation with multiple random trials for robust results.
+        
+        Args:
+            train_dataset: Training dataset
+            test_dataset: Test dataset
+            k_shots: List of k values to evaluate
+            num_trials: Number of random trials per k-shot (default: 3)
+            
+        Returns:
+            Dictionary with mean accuracy, std, and all trial results
+        """
+        print(f"Caching features for few-shot ({num_trials} trials per k)...")
+        
+        # Extract features once (reuse across all trials)
+        train_features, train_labels = self._extract_features(train_dataset)
+        test_features, test_labels = self._extract_features(test_dataset)
+        
+        results = {}
+        
         for k in k_shots:
             print(f"Evaluating {k}-shot...")
-
-            indices = []
-            for c in unique_classes:
-                c_indices = np.where(train_labels == c)[0]
-                n_samples = min(len(c_indices), k)
-
-                if n_samples > 0:
-                    chosen = np.random.choice(c_indices, n_samples, replace=False)
-                    indices.extend(chosen)
-
-            if len(indices) == 0:
-                continue
-
-            k_features = train_features[indices]
-            k_labels = train_labels[indices]
-
-            try:
-                clf = LogisticRegression(
-                    random_state=0,
-                    C=C,
-                    max_iter=1000,
-                    verbose=0,
-                    n_jobs=1,
-                    solver='lbfgs'
-                )
-                clf.fit(k_features, k_labels)
-                predictions = clf.predict(test_features)
-                accuracy = np.mean((test_labels == predictions).astype(float)) * 100.0
+            trial_accuracies = []
+            
+            # Run multiple trials with different seeds
+            for trial_idx in range(num_trials):
+                seed = 42 + trial_idx  # Seeds: 42, 43, 44
+                np.random.seed(seed)
+                torch.manual_seed(seed)
                 
-                # Track classification report for the final k-shot value
-                if k == k_shots[-1]:  
-                    self.metrics.track_classification_report(test_labels, predictions)
-
-                results[f"{k}-shot"] = accuracy
-                print(f"  {k}-shot Accuracy: {accuracy:.2f}%")
+                try:
+                    # Sample k examples per class with current seed
+                    selected_indices = []
+                    unique_labels = np.unique(train_labels)
+                    
+                    for label in unique_labels:
+                        label_indices = np.where(train_labels == label)[0]
+                        
+                        if len(label_indices) >= k:
+                            # Random sample with current seed
+                            sampled = np.random.choice(label_indices, k, replace=False)
+                            selected_indices.extend(sampled)
+                        else:
+                            # If not enough samples, use all available
+                            selected_indices.extend(label_indices)
+                    
+                    selected_indices = np.array(selected_indices)
+                    
+                    # Prepare training data for this trial
+                    X_train = train_features[selected_indices]
+                    y_train = train_labels[selected_indices]
+                    
+                    # Train logistic regression classifier
+                    classifier = LogisticRegression(
+                        max_iter=1000,
+                        random_state=seed,
+                        C=1.0,
+                        solver='lbfgs',
+                        n_jobs=-1
+                    )
+                    
+                    classifier.fit(X_train, y_train)
+                    
+                    # Evaluate on test set
+                    predictions = classifier.predict(test_features)
+                    accuracy = accuracy_score(test_labels, predictions) * 100
+                    
+                    trial_accuracies.append(accuracy)
+                    
+                except Exception as e:
+                    print(f"  Trial {trial_idx + 1}/{num_trials} failed: {e}")
+                    continue
+            
+            # Compute statistics across trials
+            if len(trial_accuracies) > 0:
+                mean_acc = np.mean(trial_accuracies)
+                std_acc = np.std(trial_accuracies)
+                min_acc = np.min(trial_accuracies)
+                max_acc = np.max(trial_accuracies)
                 
-            except Exception as e:
-                print(f"  {k}-shot Failed: {e}")
-
+                results[f'{k}-shot'] = {
+                    'accuracy_mean': round(float(mean_acc), 2),
+                    'accuracy_std': round(float(std_acc), 2),
+                    'accuracy_min': round(float(min_acc), 2),
+                    'accuracy_max': round(float(max_acc), 2),
+                    'num_trials': len(trial_accuracies),
+                    'all_trials': [round(float(acc), 2) for acc in trial_accuracies]
+                }
+                
+                print(f"  {k}-shot: {mean_acc:.2f}% ± {std_acc:.2f}% (range: {min_acc:.2f}%-{max_acc:.2f}%)")
+            else:
+                results[f'{k}-shot'] = {
+                    'accuracy_mean': 0.0,
+                    'accuracy_std': 0.0,
+                    'num_trials': 0,
+                    'error': 'All trials failed'
+                }
+                print(f"  {k}-shot: All trials failed!")
+        
         return results

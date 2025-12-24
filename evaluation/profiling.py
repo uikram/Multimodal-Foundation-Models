@@ -6,7 +6,7 @@ import time
 import torch
 import psutil
 import numpy as np
-from typing import Dict, List, Callable
+from typing import Dict, List, Callable, Any
 from dataclasses import dataclass
 
 
@@ -20,6 +20,78 @@ class ProfileResults:
     throughput: float  # samples/second
     memory_allocated_mb: float
     memory_reserved_mb: float
+
+
+class EfficiencyProfiler:
+    """Profiler specifically designed for Table 5 in the paper."""
+    
+    def __init__(self, device='cuda'):
+        self.device = device
+
+    def profile_model(self, model, input_shape=(1, 3, 224, 224), num_iterations=100):
+        """
+        Measures Latency, Throughput, Peak Memory, and FLOPs (estimated).
+        """
+        model.eval()
+        model.to(self.device)
+        
+        # Generate dummy input
+        dummy_input = torch.randn(input_shape).to(self.device)
+        
+        # 1. Warmup (crucial for CUDA kernels)
+        print("  Warmup...")
+        with torch.no_grad():
+            for _ in range(10):
+                if hasattr(model, 'encode_image'):
+                    _ = model.encode_image(dummy_input)
+                else:
+                    _ = model(dummy_input)
+        
+        # 2. Measure Latency
+        print(f"  Profiling Latency ({num_iterations} runs)...")
+        latencies = []
+        with torch.no_grad():
+            for _ in range(num_iterations):
+                if self.device == 'cuda' and torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                start_time = time.time()
+                
+                if hasattr(model, 'encode_image'):
+                    _ = model.encode_image(dummy_input)
+                else:
+                    _ = model(dummy_input)
+                
+                if self.device == 'cuda' and torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                latencies.append((time.time() - start_time) * 1000) # ms
+
+        # 3. Measure PEAK Memory (Critical for Wearable Robotics)
+        print("  Profiling Peak Memory...")
+        if self.device == 'cuda' and torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            with torch.no_grad():
+                if hasattr(model, 'encode_image'):
+                    _ = model.encode_image(dummy_input)
+                else:
+                    _ = model(dummy_input)
+            peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 2) # MB
+        else:
+            peak_memory = 0.0
+
+        # 4. Parameter Counts
+        params = model.count_parameters() if hasattr(model, 'count_parameters') else {}
+        total_params = params.get('total', 0) / 1e6 # Million
+        trainable_params = params.get('trainable', 0) / 1e6 # Million
+
+        results = {
+            "latency_ms": np.mean(latencies),
+            "latency_std": np.std(latencies),
+            "throughput": 1000 / np.mean(latencies),
+            "peak_memory_mb": peak_memory,
+            "params_total_M": total_params,
+            "params_trainable_M": trainable_params
+        }
+        return results
 
 
 class ModelProfiler:
@@ -37,14 +109,6 @@ class ModelProfiler:
     ) -> ProfileResults:
         """
         Profile model inference performance.
-        
-        Args:
-            input_generator: Function that generates model inputs
-            num_iterations: Number of iterations to measure
-            warmup_iterations: Number of warmup iterations (not measured)
-        
-        Returns:
-            ProfileResults with timing and memory statistics
         """
         self.model.eval()
         times = []
@@ -107,75 +171,6 @@ class ModelProfiler:
             return self.model(*inputs)
         else:
             return self.model(inputs)
-    
-    def profile_batch_sizes(
-        self,
-        input_generator_factory: Callable[[int], Callable],
-        batch_sizes: List[int] = [1, 2, 4, 8, 16, 32, 64, 128],
-        num_iterations: int = 50
-    ) -> Dict[int, ProfileResults]:
-        """
-        Profile model across different batch sizes.
-        
-        Args:
-            input_generator_factory: Function that takes batch_size and returns input_generator
-            batch_sizes: List of batch sizes to test
-            num_iterations: Number of iterations per batch size
-        
-        Returns:
-            Dictionary mapping batch_size -> ProfileResults
-        """
-        results = {}
-        
-        for batch_size in batch_sizes:
-            print(f"\nProfiling batch size: {batch_size}")
-            try:
-                input_gen = input_generator_factory(batch_size)
-                result = self.profile_inference(input_gen, num_iterations)
-                results[batch_size] = result
-                
-                print(f"  Avg time: {result.avg_time_ms:.2f}ms")
-                print(f"  Throughput: {result.throughput * batch_size:.2f} samples/sec")
-                print(f"  Memory: {result.memory_allocated_mb:.2f}MB")
-                
-            except RuntimeError as e:
-                if "out of memory" in str(e):
-                    print(f"  ✗ Out of memory at batch size {batch_size}")
-                    break
-                else:
-                    raise
-        
-        return results
-    
-    def compare_models(
-        self,
-        models: Dict[str, torch.nn.Module],
-        input_generator: Callable,
-        num_iterations: int = 100
-    ) -> Dict[str, ProfileResults]:
-        """
-        Compare performance across multiple models.
-        
-        Args:
-            models: Dictionary of model_name -> model
-            input_generator: Function that generates inputs
-            num_iterations: Number of iterations per model
-        
-        Returns:
-            Dictionary mapping model_name -> ProfileResults
-        """
-        results = {}
-        
-        for name, model in models.items():
-            print(f"\nProfiling {name}...")
-            profiler = ModelProfiler(model, self.device)
-            result = profiler.profile_inference(input_generator, num_iterations)
-            results[name] = result
-            
-            print(f"  Avg time: {result.avg_time_ms:.2f}ms")
-            print(f"  Throughput: {result.throughput:.2f} samples/sec")
-        
-        return results
 
 
 class MemoryProfiler:
@@ -209,51 +204,3 @@ class MemoryProfiler:
             'rss_mb': mem_info.rss / 1024 / 1024,  # Resident Set Size
             'vms_mb': mem_info.vms / 1024 / 1024,  # Virtual Memory Size
         }
-    
-    @staticmethod
-    def print_memory_summary():
-        """Print formatted memory summary."""
-        gpu_mem = MemoryProfiler.get_gpu_memory()
-        cpu_mem = MemoryProfiler.get_cpu_memory()
-        
-        print("\n" + "="*60)
-        print("MEMORY SUMMARY")
-        print("="*60)
-        
-        if gpu_mem['allocated_mb'] > 0:
-            print("\nGPU Memory:")
-            print(f"  Allocated: {gpu_mem['allocated_mb']:.2f} MB")
-            print(f"  Reserved:  {gpu_mem['reserved_mb']:.2f} MB")
-            print(f"  Free:      {gpu_mem['free_mb']:.2f} MB")
-            print(f"  Total:     {gpu_mem['total_mb']:.2f} MB")
-        else:
-            print("\nGPU: Not available")
-        
-        print("\nCPU Memory:")
-        print(f"  RSS: {cpu_mem['rss_mb']:.2f} MB")
-        print(f"  VMS: {cpu_mem['vms_mb']:.2f} MB")
-        print("="*60 + "\n")
-
-
-# Example usage functions
-
-def example_clip_profiling():
-    """Example: Profile CLIP model."""
-    from models.clip_baseline import CLIPBaseline
-    from utils.config import CLIPConfig
-    
-    config = CLIPConfig()
-    model = CLIPBaseline(config)
-    profiler = ModelProfiler(model, config.device)
-    
-    # Define input generator
-    def input_gen():
-        dummy_image = torch.randn(1, 3, 224, 224).to(config.device)
-        return (dummy_image,)
-    
-    # Profile
-    results = profiler.profile_inference(input_gen, num_iterations=100)
-    
-    print(f"\nAverage inference time: {results.avg_time_ms:.2f}ms")
-    print(f"Throughput: {results.throughput:.2f} samples/sec")
-    print(f"Memory allocated: {results.memory_allocated_mb:.2f}MB")

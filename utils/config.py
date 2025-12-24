@@ -52,7 +52,6 @@ class BaseConfig:
 class CLIPConfig(BaseConfig):
     """Configuration for CLIP Baseline (Hugging Face)."""
     
-    # --- CHANGED: Use Hugging Face ID instead of 'ViT-B-32' ---
     model_name: str = "openai/clip-vit-base-patch32"
     
     batch_size: int = 64
@@ -62,9 +61,8 @@ class CLIPConfig(BaseConfig):
 
 @dataclass
 class CLIPLoRAConfig(BaseConfig):
-    """Configuration for CLIP + LoRA."""
-    
-    # --- CHANGED: Use Hugging Face ID ---
+    """Configuration for CLIP + LoRA (Hugging Face)"""
+
     model_id: str = "openai/clip-vit-base-patch32"
     
     batch_size: int = 64  
