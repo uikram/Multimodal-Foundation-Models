@@ -6,7 +6,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import GPT2Tokenizer
-
+import torch.nn as nn
+from pathlib import Path
 
 class FrozenTrainer:
     """Trainer for Frozen architecture."""
@@ -22,15 +23,16 @@ class FrozenTrainer:
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Optimizer (Vision Encoder only)
+        # FIX: Added betas=(0.9, 0.95) to match original script
         self.optimizer = torch.optim.Adam(
-                                        self.model.vision_encoder.parameters(),
-                                        lr=config.learning_rate,
-                                        weight_decay=config.weight_decay
-                                        )
-
+            self.model.vision_encoder.parameters(),
+            lr=config.learning_rate,
+            betas=(0.9, 0.95),
+            weight_decay=config.weight_decay
+        )
         
         # Mixed precision scaler
-        self.scaler = torch.cuda.amp.GradScaler() if config.fp16 else None
+        self.scaler = torch.amp.GradScaler('cuda') if config.fp16 else None
         
         # Training state
         self.global_step = 0
@@ -47,13 +49,9 @@ class FrozenTrainer:
         
         print(f"✓ Loaded {len(train_loader)} training batches")
         print(f"✓ Loaded {len(val_loader)} validation batches")
-        print(f"  Batch size: {self.config.batch_size}")
         
-        # Track memory before training
+        # Track memory
         self.metrics.track_gpu_memory('pre_training')
-        self.metrics.track_cpu_memory()
-        
-        # Start timer
         self.metrics.start_training_timer()
         
         # Training loop
@@ -61,7 +59,10 @@ class FrozenTrainer:
         print("="*60)
         
         for epoch in range(self.config.num_epochs):
-            train_loss = self.train_epoch(epoch, train_loader)
+            # Pass val_loader to train_epoch for mid-epoch validation
+            train_loss = self.train_epoch(epoch, train_loader, val_loader)
+            
+            # End of epoch validation
             val_loss = self.validate(val_loader)
             self.metrics.track_epoch_metrics(epoch+1, train_loss=train_loss, val_loss=val_loss)
             
@@ -70,36 +71,23 @@ class FrozenTrainer:
             print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
             print(f"{'='*60}\n")
             
-            # Save checkpoint
-            self.save_checkpoint(epoch, val_loss)
-        
-            # End timer
-            self.metrics.end_training_timer()
+            # Save epoch checkpoint
+            self.save_checkpoint(epoch, val_loss, is_best=False)
+            
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.save_checkpoint(epoch, val_loss, is_best=True)
 
-            # Track memory after training
-            self.metrics.track_gpu_memory('post_training')
-
-            # Track final training performance
-            self.metrics.track_performance(accuracy=0.0, loss=self.best_val_loss) 
-
-            print("\n✅ Training Complete!")
-            print(f"Best Validation Loss: {self.best_val_loss:.4f}")
+        self.metrics.end_training_timer()
+        self.metrics.track_gpu_memory('post_training')
+        print("\n✅ Training Complete!")
         
     def get_dataloaders(self):
-        """Get training and validation dataloaders."""
         from datasets.dataloaders import FrozenConceptualCaptionsDataset
-        from pathlib import Path
-        from torch.utils.data import DataLoader
         
-        # Check if debug mode is enabled
         debug_mode = getattr(self.config, 'debug_mode', False)
         max_samples = 500 if debug_mode else None
-        val_max_samples = 100 if debug_mode else None
         
-        if debug_mode:
-            print("🔧 DEBUG MODE ENABLED: Training on limited samples")
-        
-        # Create datasets
         train_ds = FrozenConceptualCaptionsDataset(
             Path(self.config.train_image_dir),
             Path(self.config.train_file),
@@ -115,10 +103,9 @@ class FrozenTrainer:
             self.tokenizer,
             self.config,
             debug_mode=debug_mode,
-            max_samples=val_max_samples
+            max_samples=100 if debug_mode else None
         )
         
-        # Create dataloaders (disable multiprocessing in debug mode)
         train_loader = DataLoader(
             train_ds,
             batch_size=self.config.batch_size,
@@ -137,9 +124,8 @@ class FrozenTrainer:
         
         return train_loader, val_loader
 
-    
-    def train_epoch(self, epoch, train_loader):
-        """Train for one epoch."""
+    def train_epoch(self, epoch, train_loader, val_loader):
+        """Train for one epoch with mid-epoch validation."""
         self.model.train()
         epoch_loss = 0.0
         
@@ -149,23 +135,44 @@ class FrozenTrainer:
             dynamic_ncols=True
         )
         
-        for batch in pbar:
-            loss = self.train_step(batch)
+        for step, batch in enumerate(pbar):
+            loss = self.train_step(batch, step)
             epoch_loss += loss
-            
             pbar.set_postfix({'loss': f'{loss:.4f}'})
+            
+            # --- MID-EPOCH VALIDATION LOGIC ---
+            # Check if we just completed an optimization step
+            if (step + 1) % self.config.gradient_accumulation_steps == 0:
+                # Perform validation every 1000 GLOBAL steps
+                if self.global_step > 0 and self.global_step % 1000 == 0:
+                    print(f"\n\n[Step {self.global_step}] Running Validation...")
+                    val_loss = self.validate(val_loader)
+                    print(f"[Step {self.global_step}] Val Loss: {val_loss:.4f}\n")
+                    
+                    if val_loss < self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        self.save_checkpoint(epoch, val_loss, is_best=True)
+                    
+                    # Ensure model is back in train mode
+                    self.model.train()
         
         return epoch_loss / len(train_loader)
     
-    def train_step(self, batch):
+    def train_step(self, batch, step):
         """Single training step."""
         images = batch['images'].to(self.device)
         input_ids = batch['input_ids'].to(self.device)
         attention_mask = batch['attention_mask'].to(self.device)
         labels = batch['labels'].to(self.device)
         
-        # Forward pass with mixed precision
-        with torch.cuda.amp.autocast(enabled=self.config.fp16):
+        # Forward pass
+        if self.config.fp16:
+            with torch.amp.autocast('cuda'):
+                logits, loss = self.model.forward(
+                    images, input_ids, attention_mask, labels
+                )
+                loss = loss / self.config.gradient_accumulation_steps
+        else:
             logits, loss = self.model.forward(
                 images, input_ids, attention_mask, labels
             )
@@ -177,15 +184,16 @@ class FrozenTrainer:
         else:
             loss.backward()
         
-        # Optimization step
-        if (self.global_step + 1) % self.config.gradient_accumulation_steps == 0:
+        # Optimization step - Triggered by Loop Index 'step'
+        if (step + 1) % self.config.gradient_accumulation_steps == 0:
             if self.config.fp16:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 self.optimizer.step()
+            
             self.optimizer.zero_grad()
-            self.global_step += 1
+            self.global_step += 1 # Increment global step
         
         return loss.item() * self.config.gradient_accumulation_steps
     
@@ -201,7 +209,12 @@ class FrozenTrainer:
                 attention_mask = batch['attention_mask'].to(self.device)
                 labels = batch['labels'].to(self.device)
                 
-                with torch.cuda.amp.autocast(enabled=self.config.fp16):
+                if self.config.fp16:
+                    with torch.amp.autocast('cuda'):
+                        _, loss = self.model.forward(
+                            images, input_ids, attention_mask, labels
+                        )
+                else:
                     _, loss = self.model.forward(
                         images, input_ids, attention_mask, labels
                     )
@@ -210,25 +223,22 @@ class FrozenTrainer:
         
         return total_loss / len(val_loader)
     
-    def save_checkpoint(self, epoch, val_loss):
-        """Save model checkpoint."""
+    def save_checkpoint(self, epoch, val_loss, is_best=False):
+        """Save checkpoint."""
         checkpoint = {
             'epoch': epoch,
             'global_step': self.global_step,
             'model_state': self.model.vision_encoder.state_dict(),
             'optimizer_state': self.optimizer.state_dict(),
-            'val_loss': val_loss
+            'val_loss': val_loss,
+            'config': vars(self.config)
         }
         
-        # Save regular checkpoint
-        checkpoint_path = self.config.checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pt"
-        torch.save(checkpoint, checkpoint_path)
-        
-        # Save best model
-        if val_loss < self.best_val_loss:
-            self.best_val_loss = val_loss
-            best_path = self.config.checkpoint_dir / "best_model.pt"
-            torch.save(checkpoint, best_path)
-            print(f"  ✓ Saved best model to {best_path}")
-        
-        print(f"  ✓ Saved checkpoint to {checkpoint_path}")
+        if is_best:
+            path = self.config.checkpoint_dir / "best_model.pt"
+            print(f"  ✓ Saved best model to {path}")
+        else:
+            path = self.config.checkpoint_dir / f"checkpoint_step_{self.global_step}.pt"
+            # print(f"  ✓ Saved checkpoint to {path}")
+            
+        torch.save(checkpoint, path)

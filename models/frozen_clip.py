@@ -7,6 +7,7 @@ import torch.nn as nn
 import timm
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 
 class VisionEncoder(nn.Module):
     """Vision encoder using ResNet-50 with projection."""
@@ -50,14 +51,15 @@ class FrozenCLIP(nn.Module):
         # Vision encoder
         print(f"Loading vision encoder: {config.vision_encoder_name}...")
         self.vision_encoder = VisionEncoder(config).to(self.device)
-        # FIX: Match old evaluation transform (Bicubic Interpolation)
-        from torchvision.transforms import InterpolationMode
+        
+        # Standard Preprocessing
         self.preprocess = transforms.Compose([
             transforms.Resize(224, interpolation=InterpolationMode.BICUBIC),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
+        
         # Language model
         print(f"Loading LLM: {config.language_model_name}...")
         self.tokenizer = GPT2Tokenizer.from_pretrained(
@@ -105,7 +107,7 @@ class FrozenCLIP(nn.Module):
         )
         combined_mask = torch.cat([visual_attention, attention_mask], dim=1)
         
-        # Forward through LM (DON'T pass labels here!)
+        # Forward through LM
         outputs = self.language_model(
             inputs_embeds=combined_embeds,
             attention_mask=combined_mask,
@@ -117,9 +119,12 @@ class FrozenCLIP(nn.Module):
         # Compute loss manually if labels provided
         loss = None
         if labels is not None:
-            # Shift logits: skip visual prefix tokens and align for next-token prediction
-            shift_logits = logits[:, self.config.visual_prefix_length:-1, :].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
+            # FIX: Start slicing one token earlier (prefix_length - 1)
+            # This ensures the last Visual Token is used to predict the First Text Token.
+            start_idx = self.config.visual_prefix_length - 1
+            
+            shift_logits = logits[:, start_idx:-1, :].contiguous()
+            shift_labels = labels.contiguous()
             
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(
@@ -129,27 +134,59 @@ class FrozenCLIP(nn.Module):
         
         return logits, loss
     
-    # def encode_image(self, images):
-    #     """Encode images to feature vectors for evaluation."""
-    #     self.vision_encoder.eval()
-    #     with torch.no_grad():
-    #         # Get features from backbone
-    #         features = self.vision_encoder.backbone(images)
-    #         features = self.vision_encoder.pool(features).flatten(1)
-    #         features = features / features.norm(dim=-1, keepdim=True)
-    #     return features
+    def generate(self, images, tokenizer, max_length=50, temperature=1.0, top_k=50):
+        """Generate captions for images using autoregressive sampling."""
+        self.eval()
+        batch_size = images.size(0)
+        
+        with torch.no_grad():
+            # Get visual prefix
+            visual_prefix = self.vision_encoder(images)
+            
+            # Start token
+            start_token = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+            
+            input_ids = torch.full(
+                (batch_size, 1),
+                start_token,
+                dtype=torch.long,
+                device=self.device
+            )
+            
+            for _ in range(max_length):
+                text_embeds = self.language_model.transformer.wte(input_ids)
+                combined_embeds = torch.cat([visual_prefix, text_embeds], dim=1)
+                
+                outputs = self.language_model(
+                    inputs_embeds=combined_embeds,
+                    return_dict=True
+                )
+                
+                next_token_logits = outputs.logits[:, -1, :] / temperature
+                
+                if top_k > 0:
+                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                    next_token_logits[indices_to_remove] = -float('Inf')
+                
+                probs = torch.nn.functional.softmax(next_token_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+                
+                input_ids = torch.cat([input_ids, next_token], dim=1)
+                
+                if (next_token == tokenizer.eos_token_id).all():
+                    break
+            
+            captions = [tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
+            
+        return captions
 
     def encode_image(self, images):
         """Encode images to feature vectors for evaluation."""
         self.vision_encoder.eval()
         with torch.no_grad():
-            # CORRECTION: Call the module directly to include Projection Layer
-            features = self.vision_encoder(images) 
-            
-            # CORRECTION: Flatten [Batch, Prefix_Len, Dim] -> [Batch, Features]
+            features = self.vision_encoder(images)
             if features.dim() == 3:
                 features = features.flatten(start_dim=1)
-                
             features = features / features.norm(dim=-1, keepdim=True)
         return features
     
@@ -157,54 +194,32 @@ class FrozenCLIP(nn.Module):
         """Encode text to feature vectors for evaluation."""
         self.language_model.eval()
         with torch.no_grad():
-            # Get GPT-2 outputs with hidden states
             outputs = self.language_model(
                 input_ids=text_tokens,
                 attention_mask=(text_tokens != self.tokenizer.pad_token_id),
-                output_hidden_states=True  # Request hidden states!
+                output_hidden_states=True
             )
-            
-            # Use last hidden state from hidden_states tuple
             hidden_states = outputs.hidden_states[-1]
-            
-            # Average pooling over sequence length
             attention_mask = (text_tokens != self.tokenizer.pad_token_id).unsqueeze(-1)
             text_embeds = (hidden_states * attention_mask).sum(dim=1) / attention_mask.sum(dim=1)
-            
-            # Normalize for similarity comparisons
             text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
-        
         return text_embeds
     
     def eval(self):
-        """Set model to evaluation mode."""
         self.vision_encoder.eval()
         self.language_model.eval()
         return self
     
     def train(self, mode=True):
-        """Set model to training mode."""
         self.vision_encoder.train(mode)
-        self.language_model.eval()  # Keep LM frozen
+        self.language_model.eval()
         return self
     
     def to(self, device):
-        """Move model to specified device."""
         self.device = device
         self.vision_encoder = self.vision_encoder.to(device)
         self.language_model = self.language_model.to(device)
         return self
-    
+
     def parameters(self):
-        """Return trainable parameters only."""
         return self.vision_encoder.parameters()
-    
-    def count_parameters(self):
-        """Count total and trainable parameters."""
-        trainable = sum(p.numel() for p in self.vision_encoder.parameters() if p.requires_grad)
-        frozen = sum(p.numel() for p in self.language_model.parameters())
-        return {
-            'total': trainable + frozen,
-            'trainable': trainable,
-            'frozen': frozen
-        }
