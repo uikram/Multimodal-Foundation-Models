@@ -140,21 +140,20 @@ class FrozenTrainer:
             epoch_loss += loss
             pbar.set_postfix({'loss': f'{loss:.4f}'})
             
-            # --- MID-EPOCH VALIDATION LOGIC ---
-            # Check if we just completed an optimization step
-            if (step + 1) % self.config.gradient_accumulation_steps == 0:
-                # Perform validation every 1000 GLOBAL steps
-                if self.global_step > 0 and self.global_step % 1000 == 0:
-                    print(f"\n\n[Step {self.global_step}] Running Validation...")
-                    val_loss = self.validate(val_loader)
-                    print(f"[Step {self.global_step}] Val Loss: {val_loss:.4f}\n")
-                    
-                    if val_loss < self.best_val_loss:
-                        self.best_val_loss = val_loss
-                        self.save_checkpoint(epoch, val_loss, is_best=True)
-                    
-                    # Ensure model is back in train mode
-                    self.model.train()
+            # Perform validation every 1000 GLOBAL steps
+            if self.global_step > 0 and self.global_step % 1000 == 0:
+                print(f"\n\n[Step {self.global_step}] Running Validation...")
+                val_loss = self.validate(val_loader)
+                print(f"[Step {self.global_step}] Val Loss: {val_loss:.4f}\n")
+                
+                self.save_checkpoint(epoch, val_loss, is_best=False)
+
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    self.save_checkpoint(epoch, val_loss, is_best=True)
+                
+                # Ensure model is back in train mode
+                self.model.train()
         
         return epoch_loss / len(train_loader)
     
@@ -234,11 +233,17 @@ class FrozenTrainer:
             'config': vars(self.config)
         }
         
+        # 1. Save step-based checkpoint (Original behavior)
+        step_path = self.config.checkpoint_dir / f"checkpoint_step_{self.global_step}.pt"
+        torch.save(checkpoint, step_path)
+        
+        # 2. FIX: Also save epoch-based checkpoint for easier identification
+        epoch_path = self.config.checkpoint_dir / f"checkpoint_epoch_{epoch}.pt"
+        torch.save(checkpoint, epoch_path)
+        print(f"  ✓ Saved epoch checkpoint to {epoch_path}")
+        
+        # 3. Save best model
         if is_best:
-            path = self.config.checkpoint_dir / "best_model.pt"
-            print(f"  ✓ Saved best model to {path}")
-        else:
-            path = self.config.checkpoint_dir / f"checkpoint_step_{self.global_step}.pt"
-            # print(f"  ✓ Saved checkpoint to {path}")
-            
-        torch.save(checkpoint, path)
+            best_path = self.config.checkpoint_dir / "best_model.pt"
+            torch.save(checkpoint, best_path)
+            print(f"  ✓ Saved best model to {best_path}")

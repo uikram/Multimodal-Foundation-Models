@@ -52,10 +52,19 @@ class FrozenCLIP(nn.Module):
         print(f"Loading vision encoder: {config.vision_encoder_name}...")
         self.vision_encoder = VisionEncoder(config).to(self.device)
         
-        # Standard Preprocessing
+        # [PAPER FIX] Inference Preprocessing
+        def pad_to_square(img):
+            from PIL import Image
+            w, h = img.size
+            if w == h: return img
+            max_size = max(w, h)
+            new_img = Image.new('RGB', (max_size, max_size), (0, 0, 0))
+            new_img.paste(img, ((max_size - w) // 2, (max_size - h) // 2))
+            return new_img
+
         self.preprocess = transforms.Compose([
+            transforms.Lambda(pad_to_square), # <--- THE FIX
             transforms.Resize(224, interpolation=InterpolationMode.BICUBIC),
-            transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
@@ -64,20 +73,20 @@ class FrozenCLIP(nn.Module):
         print(f"Loading LLM: {config.language_model_name}...")
         self.tokenizer = GPT2Tokenizer.from_pretrained(
             config.language_model_name,
-            cache_dir=config.cache_dir
+            cache_dir=config.cache_dir if hasattr(config, 'cache_dir') else None
         )
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
         self.language_model = GPT2LMHeadModel.from_pretrained(
             config.language_model_name,
-            cache_dir=config.cache_dir
+            cache_dir=config.cache_dir if hasattr(config, 'cache_dir') else None
         )
         self.language_model.to(self.device)
         
         # Freeze language model
         for param in self.language_model.parameters():
             param.requires_grad = False
-        
+            
         # Print parameter counts
         frozen_params = sum(p.numel() for p in self.language_model.parameters())
         trainable_params = sum(p.numel() for p in self.vision_encoder.parameters() if p.requires_grad)

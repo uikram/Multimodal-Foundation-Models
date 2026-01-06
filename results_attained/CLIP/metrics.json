@@ -1,6 +1,6 @@
 {
     "model_name": "CLIP",
-    "timestamp": "2025-12-24T01:39:49.004429",
+    "timestamp": "2025-12-30T16:58:43.816180",
     "parameters": {
         "total_parameters": 151277313,
         "trainable_parameters": 151277313,
@@ -11,19 +11,19 @@
         "inference_current_gpu_mb": 341.86,
         "inference_peak_gpu_mb": 430.83,
         "inference_reserved_gpu_mb": 464.0,
-        "inference_cpu_memory_mb": 6450.29
+        "inference_cpu_memory_mb": 6762.29
     },
     "latency": {
-        "average_ms_per_sample": 0.2181,
-        "median_ms_per_sample": 0.2181,
-        "std_ms_per_sample": 0.0002,
-        "min_ms_per_sample": 0.2178,
-        "max_ms_per_sample": 0.2183,
-        "p95_ms_per_sample": 0.2183,
-        "p99_ms_per_sample": 0.2183,
+        "average_ms_per_sample": 0.2274,
+        "median_ms_per_sample": 0.2274,
+        "std_ms_per_sample": 0.0,
+        "min_ms_per_sample": 0.2274,
+        "max_ms_per_sample": 0.2274,
+        "p95_ms_per_sample": 0.2274,
+        "p99_ms_per_sample": 0.2274,
         "samples_measured": 128,
         "warmup_iterations": 10,
-        "throughput_samples_per_second": 4585.6
+        "throughput_samples_per_second": 4397.79
     },
     "training_time": {},
     "evaluation_results": {
@@ -390,8 +390,8 @@
     },
     "training_history": {},
     "inference_time": {
-        "total_seconds": 42.42,
-        "total_minutes": 0.71,
-        "total_hours": 0.0118
+        "total_seconds": 8.9,
+        "total_minutes": 0.15,
+        "total_hours": 0.0025
     }
 }
