@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader
 from training.train import ModelTrainer
 from evaluation.evaluate import ModelEvaluator
 from evaluation.metrics import MetricsTracker
-
+from models.frozen_clip import FrozenCLIP
 
 # Model configurations mapping
 CONFIG_MAP = {
@@ -104,78 +104,6 @@ def get_models_list(models_arg):
         return ['clip', 'clip_lora', 'frozen']
     return models_arg
 
-
-def load_model_checkpoint(model, model_name, config):
-    """Load trained checkpoint for evaluation."""
-    from pathlib import Path
-    import torch
-    
-    if model_name == 'clip_lora':
-        # LoRA saves adapter checkpoints per epoch (epoch_1, epoch_2, epoch_3)
-        checkpoint_dir = Path(config.output_dir)
-        
-        # Find the latest epoch checkpoint
-        epoch_dirs = sorted(checkpoint_dir.glob("epoch_*"))
-        
-        if not epoch_dirs:
-            print(f"No checkpoints found in {checkpoint_dir}")
-            return model
-        
-        latest_checkpoint = epoch_dirs[-1]  # Get last epoch (epoch_3)
-        print(f"Loading CLIP-LoRA checkpoint from: {latest_checkpoint}")
-        
-        # Load adapter weights
-        from peft import set_peft_model_state_dict
-        from safetensors.torch import load_file
-        
-        adapter_file_safetensors = latest_checkpoint / "adapter_model.safetensors"
-        adapter_file_bin = latest_checkpoint / "adapter_model.bin"
-        
-        if adapter_file_safetensors.exists():
-            print("Loading from .safetensors format")
-            adapter_weights = load_file(str(adapter_file_safetensors))
-        elif adapter_file_bin.exists():
-            print("Loading from .bin format")
-            adapter_weights = torch.load(adapter_file_bin, map_location=config.device)
-        else:
-            print(f"No adapter_model file found in {latest_checkpoint}")
-            return model
-        
-        # Apply to existing model (wrapper.model)
-        set_peft_model_state_dict(model.model, adapter_weights)
-        print("Loaded LoRA adapter weights")
-        
-    elif model_name == 'frozen':
-        checkpoint_path = config.checkpoint_dir / "best_model.pt"
-        
-        if not checkpoint_path.exists():
-            print(f"No checkpoint found at {checkpoint_path}")
-            return model
-        
-        print(f"Loading Frozen checkpoint from: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=config.device)
-    
-        # Handle different checkpoint formats (wrapped dict vs raw state_dict)
-        if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
-            state_dict = checkpoint['model_state']
-            print("  (Detected dictionary format with 'model_state' key)")
-        elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict']
-            print("  (Detected dictionary format with 'state_dict' key)")
-        else:
-            # Assume the checkpoint itself is the state dictionary (Common in older code)
-            state_dict = checkpoint
-            print("  (Detected raw state_dict format)")
-
-        try:
-            model.vision_encoder.load_state_dict(state_dict, strict=False)
-            print(f"Loaded vision encoder with {len(state_dict)} parameters")
-        except Exception as e:
-            print(f"Error loading weights: {e}")
-            if isinstance(checkpoint, dict):
-                print(f"   Available keys in checkpoint: {list(checkpoint.keys())}")
-    
-    return model
 
 
 def initialize_model(model_name: str, config_path: str = None):
@@ -294,24 +222,40 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
             train_dataset = load_benchmark_dataset(dataset_name, 'train', transform, config)
             test_dataset = load_benchmark_dataset(dataset_name, 'test', transform, config)
                         
-            # 1. Zero-Shot Evaluation (CLIP models only)
+            # 1. Zero-Shot Evaluation
             if hasattr(model, 'encode_text') and 'frozen' not in config.__class__.__name__.lower():
                 print(f"\n[1/3] Zero-Shot Evaluation")
                 try:
                     text_classifier = create_text_classifier(model, classnames, templates, config.device)
                     zs_results = evaluator.zero_shot_evaluation(test_dataset, text_classifier)
                     
+                    # [FIX] Handle N/A and Rounding safely
+                    top1_val = zs_results['top1']
+                    top5_val = zs_results['top5']
+                    
+                    # Convert to float only if valid number
+                    if top1_val != 'N/A':
+                        top1_val = float(top1_val)
+                        top5_val = float(top5_val)
+                    
                     metrics_tracker.track_evaluation_results(
                         dataset_name=dataset_name,
                         task='zero_shot',
                         results={
-                            'top1_accuracy': float(zs_results['top1']),
-                            'top5_accuracy': float(zs_results['top5'])
+                            'top1_accuracy': top1_val,
+                            'top5_accuracy': top5_val
                         }
                     )
-                    print(f"✓ Zero-shot: Top-1={zs_results['top1']:.2f}%, Top-5={zs_results['top5']:.2f}%")
+                    
+                    # Safe printing
+                    p_top1 = f"{top1_val:.2f}%" if isinstance(top1_val, float) else top1_val
+                    p_top5 = f"{top5_val:.2f}%" if isinstance(top5_val, float) else top5_val
+                    print(f"✓ Zero-shot: Top-1={p_top1}, Top-5={p_top5}")
+                    
                 except Exception as e:
                     print(f"✗ Zero-shot failed: {e}")
+                    import traceback
+                    traceback.print_exc()
             else:
                 print("Zero-Shot Evaluation skipped for Frozen")
 
@@ -324,8 +268,8 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
                     dataset_name=dataset_name,
                     task='linear_probe',
                     results={
-                        'accuracy': float(lp_acc),
-                        'num_samples': int(lp_samples)
+                        'accuracy': float(lp_acc,2),
+                        'num_samples': int(lp_samples,2)
                     }
                 )
                 print(f"✓ Linear Probe: {lp_acc:.2f}%")
@@ -363,12 +307,13 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
 
     # Measure latency ONCE at the end (not per dataset)
     print(f"\n{'='*60}")
-    print("Measuring Detailed Inference Latency")
+    print("Measuring Inference Latency (CIFAR-100 Test Set)")
     print(f"{'='*60}")
     try:
-        from torch.utils.data import DataLoader
+        # Reload CIFAR-100 explicitly for fair comparison
+        latency_dataset = load_benchmark_dataset('cifar100', 'test', transform, config)
         latency_loader = DataLoader(
-            test_dataset,  # Uses last test_dataset loaded
+            latency_dataset,
             batch_size=config.batch_size,
             shuffle=False,
             num_workers=config.num_workers,
@@ -603,7 +548,7 @@ def main():
 
             elif args.mode == 'evaluate':
                 model, config, metrics_tracker = initialize_model(model_name, args.config)
-                model = load_model_for_evaluation(model_name, config)  # ← CHANGED
+                model = load_model_checkpoint(model, model_name, config)
                 evaluate_model(model, config, metrics_tracker, args.datasets)
                 metrics_tracker.save_metrics()
 

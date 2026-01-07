@@ -48,8 +48,11 @@ class ModelEvaluator:
                 if isinstance(batch, (list, tuple)):
                     images, labels = batch
                 elif isinstance(batch, dict):
-                    images = batch['images']
-                    labels = batch['labels']
+                    images = batch.get('images', batch.get('pixel_values'))
+                    labels = batch.get('labels', batch.get('label'))
+                    
+                    if images is None:
+                        raise KeyError(f"Batch missing images/pixel_values. Keys: {batch.keys()}")
                 else:
                     images = batch
                     labels = None
@@ -61,9 +64,6 @@ class ModelEvaluator:
                     features = self.model.encode_image(images)
                 else:
                     features = self.model(images)
-                
-                # Normalize features
-                features = features / features.norm(dim=-1, keepdim=True)
                 
                 all_features.append(features.cpu().numpy())
                 
@@ -78,14 +78,13 @@ class ModelEvaluator:
     def zero_shot_evaluation(self, test_dataset, text_classifier):
         """
         Zero-shot evaluation using pre-computed text classifier.
-        
-        Args:
-            test_dataset: Test dataset
-            text_classifier: Pre-computed text embeddings [embedding_dim, num_classes]
-            
-        Returns:
-            Dictionary with top-1 and top-5 accuracies
         """
+        # [FIX] Skip Frozen model
+        from models.frozen_clip import FrozenCLIP
+        if isinstance(self.model, FrozenCLIP):
+            print("Skipping Zero-Shot for Frozen (Generative model incompatible with Contrastive eval)")
+            return {'top1': 'N/A', 'top5': 'N/A'}
+
         self.metrics.start_evaluation_timer()
         
         test_loader = DataLoader(
@@ -170,12 +169,13 @@ class ModelEvaluator:
         self.metrics.start_inference_timer()
         
         # Train logistic regression
+        import os
         classifier = LogisticRegression(
             max_iter=1000,
             random_state=42,
             C=1.0,
             solver='lbfgs',
-            n_jobs=-1,
+            n_jobs=min(8, os.cpu_count() or 1),
             verbose=0
         )
         
@@ -234,8 +234,9 @@ class ModelEvaluator:
                             sampled = np.random.choice(label_indices, k, replace=False)
                             selected_indices.extend(sampled)
                         else:
-                            # If not enough samples, use all available
-                            selected_indices.extend(label_indices)
+                            # [NEW] Oversample with replacement to get exactly k samples
+                            sampled = np.random.choice(label_indices, k, replace=True)
+                            selected_indices.extend(sampled) 
                     
                     selected_indices = np.array(selected_indices)
                     
@@ -243,13 +244,14 @@ class ModelEvaluator:
                     X_train = train_features[selected_indices]
                     y_train = train_labels[selected_indices]
                     
+                    import os
                     # Train logistic regression classifier
                     classifier = LogisticRegression(
                         max_iter=1000,
                         random_state=seed,
                         C=1.0,
                         solver='lbfgs',
-                        n_jobs=-1
+                        n_jobs=min(8, os.cpu_count() or 1)
                     )
                     
                     classifier.fit(X_train, y_train)

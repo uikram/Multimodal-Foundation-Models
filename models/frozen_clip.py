@@ -46,11 +46,11 @@ class FrozenCLIP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.device = config.device
+        # self.device = config.device
         
         # Vision encoder
         print(f"Loading vision encoder: {config.vision_encoder_name}...")
-        self.vision_encoder = VisionEncoder(config).to(self.device)
+        self.vision_encoder = VisionEncoder(config).to(config.device)
         
         # [PAPER FIX] Inference Preprocessing
         def pad_to_square(img):
@@ -91,6 +91,20 @@ class FrozenCLIP(nn.Module):
         frozen_params = sum(p.numel() for p in self.language_model.parameters())
         trainable_params = sum(p.numel() for p in self.vision_encoder.parameters() if p.requires_grad)
         print(f"Frozen Params: {frozen_params:,} | Trainable Params: {trainable_params:,}")
+
+    def tokenize(self, texts):
+        """Tokenize texts for the frozen language model."""
+        if isinstance(texts, str):
+            texts = [texts]
+            
+        encoded = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=self.config.visual_prefix_length if hasattr(self.config, 'visual_prefix_length') else 77,
+            return_tensors='pt'
+        )
+        return {k: v.to(self.device) for k, v in encoded.items()}
     
     def forward(self, images, input_ids, attention_mask, labels=None):
         """Forward pass for training."""
@@ -193,9 +207,12 @@ class FrozenCLIP(nn.Module):
         """Encode images to feature vectors for evaluation."""
         self.vision_encoder.eval()
         with torch.no_grad():
-            features = self.vision_encoder(images)
+            features = self.vision_encoder(images) # [B, prefix_len, hidden_dim]
+            
+            # Mean pool across prefix tokens for consistent feature size [B, hidden_dim]
             if features.dim() == 3:
-                features = features.flatten(start_dim=1)
+                features = features.mean(dim=1)
+                
             features = features / features.norm(dim=-1, keepdim=True)
         return features
     
@@ -224,8 +241,13 @@ class FrozenCLIP(nn.Module):
         self.language_model.eval()
         return self
     
+    @property
+    def device(self):
+        return next(self.vision_encoder.parameters()).device
+
     def to(self, device):
-        self.device = device
+        """Move model to device."""
+        # Don't assign self.device - it's computed by @property
         self.vision_encoder = self.vision_encoder.to(device)
         self.language_model = self.language_model.to(device)
         return self
