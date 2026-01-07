@@ -219,16 +219,44 @@ class FrozenCLIP(nn.Module):
     def encode_text(self, text_tokens):
         """Encode text to feature vectors for evaluation."""
         self.language_model.eval()
+        
+        # --- FIX START: Handle Dictionary vs Tensor ---
+        if isinstance(text_tokens, dict):
+            # Extract inputs from Hugging Face dict
+            input_ids = text_tokens['input_ids']
+            # Use the mask provided by tokenizer, or generate if missing
+            if 'attention_mask' in text_tokens:
+                attention_mask = text_tokens['attention_mask']
+            else:
+                attention_mask = (input_ids != self.tokenizer.pad_token_id).long()
+        else:
+            # Fallback for raw tensors
+            input_ids = text_tokens
+            attention_mask = (input_ids != self.tokenizer.pad_token_id).long()
+        # --- FIX END ---
+
         with torch.no_grad():
             outputs = self.language_model(
-                input_ids=text_tokens,
-                attention_mask=(text_tokens != self.tokenizer.pad_token_id),
+                input_ids=input_ids,
+                attention_mask=attention_mask,
                 output_hidden_states=True
             )
             hidden_states = outputs.hidden_states[-1]
-            attention_mask = (text_tokens != self.tokenizer.pad_token_id).unsqueeze(-1)
-            text_embeds = (hidden_states * attention_mask).sum(dim=1) / attention_mask.sum(dim=1)
+            
+            # Expand mask for broadcasting: [Batch, Seq_Len] -> [Batch, Seq_Len, 1]
+            if attention_mask.dim() == 2:
+                mask_expanded = attention_mask.unsqueeze(-1)
+            else:
+                mask_expanded = attention_mask
+
+            # Weighted sum using the attention mask
+            # Clamp sum to avoid division by zero
+            sum_mask = mask_expanded.sum(dim=1)
+            sum_mask = torch.clamp(sum_mask, min=1e-9)
+
+            text_embeds = (hidden_states * mask_expanded).sum(dim=1) / sum_mask
             text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
+            
         return text_embeds
     
     def eval(self):
