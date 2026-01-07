@@ -20,7 +20,7 @@ warnings.filterwarnings("ignore", message="The channel dimension is ambiguous")
 warnings.filterwarnings("ignore", category=UserWarning)
 
 from models import get_model
-from utils.config import CLIPConfig, CLIPLoRAConfig, FrozenConfig, load_config_from_yaml
+from utils.config import load_config_from_yaml
 from utils.helpers import seed_everything
 from torch.utils.data import DataLoader
 from training.train import ModelTrainer
@@ -28,12 +28,6 @@ from evaluation.evaluate import ModelEvaluator
 from evaluation.metrics import MetricsTracker
 from models.frozen_clip import FrozenCLIP
 
-# Model configurations mapping
-CONFIG_MAP = {
-    'clip': CLIPConfig,
-    'clip_lora': CLIPLoRAConfig,
-    'frozen': FrozenConfig
-}
 
 # Benchmark datasets for evaluation
 BENCHMARK_DATASETS = ['cifar100', 'food101', 'flowers102', 'dtd', 'eurosat']
@@ -108,18 +102,14 @@ def get_models_list(models_arg):
 
 def initialize_model(model_name: str, config_path: str = None):
     """Initialize model with configuration."""
-    print(f"\n{'='*60}")
+    
     print(f"Initializing {model_name.upper()}")
-    print(f"{'='*60}")
     
     # AUTO-LOAD YAML if not provided
     if config_path is None:
-        if model_name == 'clip':
-            config_path = "configs/clip_baseline.yaml"
-        elif model_name == 'clip_lora':
-            config_path = "configs/clip_lora.yaml"
-        elif model_name == 'frozen':
-            config_path = "configs/frozen_clip.yaml"
+        if model_name == 'clip': config_path = "configs/clip_baseline.yaml"
+        elif model_name == 'clip_lora': config_path = "configs/clip_lora.yaml"
+        elif model_name == 'frozen': config_path = "configs/frozen_clip.yaml"
     
     # Load configuration
     config = load_config_from_yaml(config_path, model_name)
