@@ -268,8 +268,8 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
                     dataset_name=dataset_name,
                     task='linear_probe',
                     results={
-                        'accuracy': float(lp_acc,2),
-                        'num_samples': int(lp_samples,2)
+                        'accuracy': float(lp_acc),
+                        'num_samples': int(lp_samples)
                     }
                 )
                 print(f"✓ Linear Probe: {lp_acc:.2f}%")
