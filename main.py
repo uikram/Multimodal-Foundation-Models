@@ -254,11 +254,23 @@ def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
 
     # Determine transform
     if hasattr(model, 'processor'):
+        # CLIP / CLIP LoRA
+        print("✓ Using Hugging Face Processor (CLIP preprocessing)")
         def hf_transform(image):
+            if image.mode != "RGB":
+                image = image.convert("RGB")
             inputs = model.processor(images=image, return_tensors="pt")
             return inputs['pixel_values'].squeeze(0)
         transform = hf_transform
+        
+    elif hasattr(model, 'preprocess'):
+        # FROZEN (Uses pad_to_square + ImageNet stats)
+        print("✓ Using model.preprocess (Frozen preprocessing)")
+        transform = model.preprocess
+        
     else:
+        # Fallback
+        print("⚠️ Warning: Using default fallback transform (CenterCrop)")
         from torchvision import transforms
         transform = transforms.Compose([
             transforms.Resize(224),
@@ -502,52 +514,74 @@ def prepare_lora_model_for_evaluation(config):
         traceback.print_exc()
         return None
 
-def load_model_for_evaluation(model_name: str, config):
-    """
-    Load model for evaluation with proper handling of merged LoRA.
+def load_model_checkpoint(model, model_name, config):
+    """Load trained checkpoint for evaluation."""
+    from peft import PeftModel
+    from models.clip_baseline import CLIPBaseline  # Import Baseline class
+    import copy
     
-    Args:
-        model_name: Model identifier (clip, clip_lora, frozen)
-        config: Model configuration
-        
-    Returns:
-        Loaded model instance
-    """
     if model_name == 'clip_lora':
-        # Try to load merged model first
-        merged_dir = prepare_lora_model_for_evaluation(config)
+        checkpoint_dir = Path(config.output_dir)
         
-        if merged_dir and merged_dir.exists():
-            print(f"\n🔄 Loading merged CLIP+LoRA for evaluation...")
-            from models.clip_baseline import CLIPBaseline
+        # ---------------------------------------------------------------------
+        # 1. Priority: Merged Model (Treat as Standard CLIP)
+        # ---------------------------------------------------------------------
+        # Looks for: /sda/usama/production_code/clip_lora_checkpoints/merged_model
+        merged_path = checkpoint_dir / "merged_model"
+        
+        if merged_path.exists() and (merged_path / "config.json").exists():
+            print(f"\n{'='*50}")
+            print(f"🔄 Found Merged Model at: {merged_path}")
+            print("Switching to CLIPBaseline for merged weights...")
+            print(f"{'='*50}")
             
-            # Create a temporary config for the merged model
-            import copy
-            merged_config = copy.deepcopy(config)
-            merged_config.model_id = str(merged_dir)
+            # Create a temporary config pointing to the merged model directory
+            merged_config = copy.copy(config)
+            merged_config.model_id = str(merged_path)
             
-            # Load as standard CLIP (no LoRA hooks)
-            model = CLIPBaseline(merged_config)
-            print("✅ Loaded merged model (adapter weights baked in)")
+            # Instantiate a fresh CLIPBaseline model
+            # This handles loading the CLIPModel and Processor correctly from the folder
+            merged_model = CLIPBaseline(merged_config)
+            
+            # Return the new model (discarding the initial CLIPLoRA wrapper)
+            return merged_model
+
+        # ---------------------------------------------------------------------
+        # 2. Fallback: Standard LoRA Adapter Loading (Epochs)
+        # ---------------------------------------------------------------------
+        epoch_dirs = sorted(checkpoint_dir.glob("epoch_*"), key=lambda p: int(p.name.split('_')[-1]))
+        
+        if not epoch_dirs:
+            print(f"No checkpoints found in {checkpoint_dir}")
             return model
-        else:
-            print("\n⚠️  Warning: Could not load merged model, falling back to LoRA with hooks")
-            print("   (This may affect latency measurements)")
-            from models.clip_lora import CLIPLoRA
-            model = CLIPLoRA(config)
-            return load_model_checkpoint(model, model_name, config)
-    
-    elif model_name == 'clip':
-        from models.clip_baseline import CLIPBaseline
-        return CLIPBaseline(config)
-    
+        
+        latest_checkpoint = epoch_dirs[-1]
+        print(f"Loading CLIP-LoRA checkpoint from: {latest_checkpoint}")
+        
+        # Use PeftModel to load adapter config and weights safely
+        model.model = PeftModel.from_pretrained(model.model.base_model, latest_checkpoint)
+        print("Loaded LoRA adapter weights & config")
+        
     elif model_name == 'frozen':
-        from models.frozen_clip import FrozenCLIP
-        model = FrozenCLIP(config)
-        return load_model_checkpoint(model, model_name, config)
+        checkpoint_path = config.checkpoint_dir / "best_model.pt"
+        
+        if not checkpoint_path.exists():
+            print(f"No checkpoint found at {checkpoint_path}")
+            return model
+        
+        print(f"Loading Frozen checkpoint from: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=config.device)
     
-    else:
-        raise ValueError(f"Unknown model: {model_name}")
+        state_dict = checkpoint['model_state'] if isinstance(checkpoint, dict) and 'model_state' in checkpoint else checkpoint
+
+        try:
+            model.vision_encoder.load_state_dict(state_dict, strict=True)
+            print(f"✓ Loaded vision encoder (Strict Mode)")
+        except Exception as e:
+            print(f"⚠️ Strict loading failed: {e}. Retrying strict=False...")
+            model.vision_encoder.load_state_dict(state_dict, strict=False)
+    
+    return model
 
 
 def main():

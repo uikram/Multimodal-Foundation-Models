@@ -49,13 +49,31 @@ class BenchmarkDatasets:
         )
     
     @staticmethod
-    def get_eurosat(cache_dir: Path, transform):
-        """Get EuroSAT dataset."""
-        return EuroSAT(
+    def get_eurosat(cache_dir: Path, transform, split='train'):
+        """Get EuroSAT dataset with deterministic split."""
+        from torch.utils.data import random_split
+        import torch
+        
+        # Load full dataset
+        full_dataset = EuroSAT(
             root=cache_dir,
             download=True,
             transform=transform
         )
+        
+        # Deterministic split (80% Train, 20% Test)
+        # Using a fixed generator ensures the split is the same every time
+        generator = torch.Generator().manual_seed(42)
+        train_size = int(0.8 * len(full_dataset))
+        test_size = len(full_dataset) - train_size
+        
+        train_ds, test_ds = random_split(
+            full_dataset, 
+            [train_size, test_size], 
+            generator=generator
+        )
+        
+        return train_ds if split == 'train' else test_ds
     
     @staticmethod
     def get_all_datasets(cache_dir: Path, transform, split='test'):
