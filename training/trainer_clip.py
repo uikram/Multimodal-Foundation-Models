@@ -224,10 +224,10 @@ class CLIPTrainer:
                     'predictions': predictions
                 }
                 
-                print(f"  ✓ {k}-shot Accuracy: {accuracy:.2f}%")
+                print(f"{k}-shot Accuracy: {accuracy:.2f}%")
                 
             except Exception as e:
-                print(f"  ✗ {k}-shot Failed: {e}")
+                print(f"{k}-shot Failed: {e}")
         
         return results, test_labels
     

@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 
-class CLIPLoRATrainer:
+class LoRATrainer:
     """Trainer for CLIP with LoRA adapters."""
     
     def __init__(self, model, config, metrics_tracker):
@@ -74,7 +74,7 @@ class CLIPLoRATrainer:
         # Track final performance
         self.metrics.track_performance(accuracy=0.0, loss=epoch_loss)
         
-        print("\n✅ Training Complete!")
+        print("\nTraining Complete!")
         print(f"Best Loss: {self.best_loss:.4f}")
     
     def train_epoch(self, epoch, train_loader):
@@ -131,6 +131,6 @@ class CLIPLoRATrainer:
             self.best_loss = loss
             best_path = self.config.output_dir / "best_model"
             self.model.save_pretrained(best_path)
-            print(f"  ✓ Saved best model to {best_path}")
+            print(f"Saved best model to {best_path}")
         
-        print(f"  ✓ Saved checkpoint to {checkpoint_path}")
+        print(f"Saved checkpoint to {checkpoint_path}")

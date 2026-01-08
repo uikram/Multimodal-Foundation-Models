@@ -3,3 +3,4 @@
 *pyc
 *.safetensors
 *.png
+/notebooks/images

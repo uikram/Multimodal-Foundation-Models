@@ -238,7 +238,7 @@ class FrozenTrainer:
         torch.save(checkpoint, step_path)
         
         # 2. FIX: Also save epoch-based checkpoint for easier identification
-        epoch_path = self.config.checkpoint_dir / f"checkpoint_epoch_{epoch}.pt"
+        epoch_path = self.config.checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pt"
         torch.save(checkpoint, epoch_path)
         print(f"  ✓ Saved epoch checkpoint to {epoch_path}")
         

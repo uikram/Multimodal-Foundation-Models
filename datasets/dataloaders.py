@@ -10,6 +10,7 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision.datasets import CIFAR100, Food101, Flowers102, DTD, EuroSAT
 from torchvision import transforms
 from tqdm import tqdm
+from utils.helpers import pad_to_square
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -150,21 +151,8 @@ class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
         self.tokenizer = tokenizer
         self.config = config
         self.debug_mode = debug_mode
-
-        # [PAPER FIX] Pad to square logic (Section 4 of paper)
-        # Prevents "squashing" objects or cropping out important details.
-        def pad_to_square(img):
-            w, h = img.size
-            if w == h: return img
-            max_size = max(w, h)
-            # Create black background (0,0,0) as padding
-            new_img = Image.new('RGB', (max_size, max_size), (0, 0, 0)) 
-            # Paste image in the center
-            new_img.paste(img, ((max_size - w) // 2, (max_size - h) // 2))
-            return new_img
-
         self.transform = transforms.Compose([
-            transforms.Lambda(pad_to_square), # <--- THE FIX
+            transforms.Lambda(pad_to_square), 
             transforms.Resize((config.image_size, config.image_size), interpolation=transforms.InterpolationMode.BICUBIC), 
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])

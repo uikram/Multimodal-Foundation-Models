@@ -1,570 +1,268 @@
 """
-Main entry point for training and evaluating multimodal foundation models.
-
-Usage:
-    python main.py --models clip --mode train
-    python main.py --models clip clip_lora frozen --mode evaluate
-    python main.py --models all --mode full_pipeline
+Main Entry Point.
+Strictly separates Training, Evaluation, and Benchmarking modes.
 """
-
 import argparse
-import warnings
-import torch
-import json
-from pathlib import Path
 import os
+import torch
+import warnings
+from pathlib import Path
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-# Suppress warnings
 warnings.filterwarnings("ignore")
-warnings.filterwarnings("ignore", message="The channel dimension is ambiguous")
-warnings.filterwarnings("ignore", category=UserWarning)
 
 from models import get_model
 from utils.config import load_config_from_yaml
 from utils.helpers import seed_everything
-from torch.utils.data import DataLoader
-from training.train import ModelTrainer
-from evaluation.evaluate import ModelEvaluator
 from evaluation.metrics import MetricsTracker
-from models.frozen_clip import FrozenCLIP
+from training.train import get_trainer
+from evaluation.evaluate import ModelEvaluator
+from evaluation.feature_cache import FeatureCache
+from utils.transforms import TransformFactory
+from utils.templates import get_classnames, get_templates
 
-
-# Benchmark datasets for evaluation
 BENCHMARK_DATASETS = ['cifar100', 'food101', 'flowers102', 'dtd', 'eurosat']
 
-
 def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Multimodal Foundation Models Training & Evaluation"
-    )
-
-    parser.add_argument(
-        '--models',
-        nargs='+',
-        choices=['clip', 'clip_lora', 'frozen', 'all'],
-        default=['clip'],
-        help='Models to train/evaluate (default: clip)'
-    )
-
-    parser.add_argument(
-        '--mode',
-        type=str,
-        choices=['train', 'evaluate', 'full_pipeline'],
-        default='full_pipeline',
-        help='Execution mode (default: full_pipeline)'
-    )
-
-    parser.add_argument(
-        '--config',
-        type=str,
-        default=None,
-        help='Path to custom config YAML file'
-    )
-
-    parser.add_argument(
-        '--seed',
-        type=int,
-        default=42,
-        help='Random seed for reproducibility (default: 42)'
-    )
-
-    parser.add_argument(
-        '--gpu',
-        type=int,
-        default=0,
-        help='GPU device ID (default: 0)'
-    )
-
-    parser.add_argument(
-        '--no-plots',
-        action='store_true',
-        help='Disable plot generation'
-    )
-
-    parser.add_argument(
-        '--datasets',
-        nargs='+',
-        default=BENCHMARK_DATASETS,
-        help='Datasets to evaluate on (default: all)'
-    )
-
+    parser = argparse.ArgumentParser(description="Multimodal Foundation Models")
+    parser.add_argument('--mode', type=str, required=True, choices=['train', 'evaluate', 'benchmark'])
+    parser.add_argument('--model', type=str, required=True, choices=['clip', 'clip_lora', 'frozen'])
+    parser.add_argument('--config', type=str, default=None)
+    parser.add_argument('--datasets', nargs='+', default=BENCHMARK_DATASETS)
+    parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=42)
     return parser.parse_args()
 
-
-def get_models_list(models_arg):
-    """Convert models argument to list."""
-    if 'all' in models_arg:
-        return ['clip', 'clip_lora', 'frozen']
-    return models_arg
-
-
-
-def initialize_model(model_name: str, config_path: str = None):
-    """Initialize model with configuration."""
-    
-    print(f"Initializing {model_name.upper()}")
-    
-    # AUTO-LOAD YAML if not provided
-    if config_path is None:
-        if model_name == 'clip': config_path = "configs/clip_baseline.yaml"
-        elif model_name == 'clip_lora': config_path = "configs/clip_lora.yaml"
-        elif model_name == 'frozen': config_path = "configs/frozen_clip.yaml"
-    
-    # Load configuration
-    config = load_config_from_yaml(config_path, model_name)
-    
-    # Initialize model
-    model = get_model(model_name, config)
-    
-    # Initialize metrics tracker
-    metrics_tracker = MetricsTracker(
-        model_name=model_name.upper(),
-        results_dir=Path(config.results_dir)  
-    )
-    
-    # Track parameters
-    metrics_tracker.track_parameters(model)
-    
-    return model, config, metrics_tracker
-
-
-def train_model(model, config, metrics_tracker):
-    """Train a single model."""
-    print(f"\n{'-'*60}")
-    print("Starting Training")
-    print(f"{'-'*60}")
-    
-    if hasattr(config, 'vision_encoder_name'):
-        from training.trainer_frozen import FrozenTrainer
-        trainer = FrozenTrainer(model, config, metrics_tracker)
-    else:
-        from training.train import ModelTrainer
-        trainer = ModelTrainer(model, config, metrics_tracker)
-    
-    trainer.train()
-    print("\nTraining completed successfully!")
-    metrics_tracker.save_metrics()
-    
-    try:
-        from utils.plotting import plot_training_curves
-        model_name = metrics_tracker.model_name
-        plot_training_curves(model_name, config.results_dir, Path('plots'))
-    except Exception as e:
-        print(f"Training curve generation failed: {e}")
-
-
-def evaluate_model(model, config, metrics_tracker, datasets_to_eval=None):
-    """Evaluate a single model on benchmark datasets."""
-    print(f"\n{'-'*60}")
-    print("Starting Evaluation")
-    print(f"{'-'*60}")
-
-    if datasets_to_eval is None:
-        datasets_to_eval = BENCHMARK_DATASETS
-
-    from utils.templates import get_templates
-
-    model.to(config.device)
-    model.eval()
-
-    evaluator = ModelEvaluator(model, config, metrics_tracker)
-
-    # Determine transform
-    if hasattr(model, 'processor'):
-        # CLIP / CLIP LoRA
-        print("✓ Using Hugging Face Processor (CLIP preprocessing)")
-        def hf_transform(image):
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-            inputs = model.processor(images=image, return_tensors="pt")
-            return inputs['pixel_values'].squeeze(0)
-        transform = hf_transform
-        
-    elif hasattr(model, 'preprocess'):
-        # FROZEN (Uses pad_to_square + ImageNet stats)
-        print("✓ Using model.preprocess (Frozen preprocessing)")
-        transform = model.preprocess
-        
-    else:
-        # Fallback
-        print("⚠️ Warning: Using default fallback transform (CenterCrop)")
-        from torchvision import transforms
-        transform = transforms.Compose([
-            transforms.Resize(224),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), 
-                              (0.26862954, 0.26130258, 0.27577711))
-        ])
-
-    # Evaluate on each dataset
-    for dataset_name in datasets_to_eval:
-        print(f"\n{'='*60}")
-        print(f"Evaluating on {dataset_name.upper()}")
-        print(f"{'='*60}")
-
-        try:
-            classnames = get_classnames(dataset_name)
-            templates = get_templates(dataset_name)
-
-            print(f"Loading {dataset_name} datasets...")
-            train_dataset = load_benchmark_dataset(dataset_name, 'train', transform, config)
-            test_dataset = load_benchmark_dataset(dataset_name, 'test', transform, config)
-                        
-            # 1. Zero-Shot Evaluation
-            if hasattr(model, 'encode_text') and 'frozen' not in config.__class__.__name__.lower():
-                print(f"\n[1/3] Zero-Shot Evaluation")
-                try:
-                    text_classifier = create_text_classifier(model, classnames, templates, config.device)
-                    zs_results = evaluator.zero_shot_evaluation(test_dataset, text_classifier)
-                    
-                    # [FIX] Handle N/A and Rounding safely
-                    top1_val = zs_results['top1']
-                    top5_val = zs_results['top5']
-                    
-                    # Convert to float only if valid number
-                    if top1_val != 'N/A':
-                        top1_val = float(top1_val)
-                        top5_val = float(top5_val)
-                    
-                    metrics_tracker.track_evaluation_results(
-                        dataset_name=dataset_name,
-                        task='zero_shot',
-                        results={
-                            'top1_accuracy': top1_val,
-                            'top5_accuracy': top5_val
-                        }
-                    )
-                    
-                    # Safe printing
-                    p_top1 = f"{top1_val:.2f}%" if isinstance(top1_val, float) else top1_val
-                    p_top5 = f"{top5_val:.2f}%" if isinstance(top5_val, float) else top5_val
-                    print(f"✓ Zero-shot: Top-1={p_top1}, Top-5={p_top5}")
-                    
-                except Exception as e:
-                    print(f"✗ Zero-shot failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-            else:
-                print("Zero-Shot Evaluation skipped for Frozen")
-
-            # 2. Linear Probe Evaluation
-            print(f"\n[2/3] Linear Probe Evaluation")
-            try:
-                lp_acc, lp_samples = evaluator.linear_probe_evaluation(train_dataset, test_dataset)
-                
-                metrics_tracker.track_evaluation_results(
-                    dataset_name=dataset_name,
-                    task='linear_probe',
-                    results={
-                        'accuracy': float(lp_acc),
-                        'num_samples': int(lp_samples)
-                    }
-                )
-                print(f"✓ Linear Probe: {lp_acc:.2f}%")
-            except Exception as e:
-                print(f"✗ Linear probe failed: {e}")
-
-            # 3. Few-Shot Evaluation (SHOULD ONLY BE HERE ONCE!)
-            print(f"\n[3/3] Few-Shot Evaluation")
-            try:
-                k_shots = config.k_shots if hasattr(config, 'k_shots') else [1, 2, 4, 8, 16]
-                
-                fs_results = evaluator.few_shot_evaluation(
-                    train_dataset, 
-                    test_dataset, 
-                    k_shots,
-                    num_trials=3
-                )
-                
-                metrics_tracker.track_evaluation_results(
-                    dataset_name=dataset_name,
-                    task='few_shot',
-                    results=fs_results
-                )
-                print(f"✓ Few-Shot completed")
-            except Exception as e:
-                print(f"✗ Few-shot failed: {e}")
-                import traceback
-                traceback.print_exc()
-
-        except Exception as e:
-            print(f"Failed to evaluate {dataset_name}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
-
-    # Measure latency ONCE at the end (not per dataset)
-    print(f"\n{'='*60}")
-    print("Measuring Inference Latency (CIFAR-100 Test Set)")
-    print(f"{'='*60}")
-    try:
-        # Reload CIFAR-100 explicitly for fair comparison
-        latency_dataset = load_benchmark_dataset('cifar100', 'test', transform, config)
-        latency_loader = DataLoader(
-            latency_dataset,
-            batch_size=config.batch_size,
-            shuffle=False,
-            num_workers=config.num_workers,
-            pin_memory=True
-        )
-        metrics_tracker.track_inference_latency(model, latency_loader, num_samples=100)
-    except Exception as e:
-        print(f"Latency tracking failed: {e}")
-
-    print("\n" + "="*60)
-    print("Evaluation completed successfully!")
-    print("="*60)
-
-
-def get_classnames(dataset_name):
-    """Get class names for a dataset."""
-    from utils.templates import (
-        CIFAR100_CLASS_NAMES, FOOD101_CLASS_NAMES, FLOWERS102_CLASS_NAMES,
-        DESCRIBABLETEXTURES_CLASS_NAMES, EUROSAT_CLASS_NAMES
-    )
-    
-    dataset_name = dataset_name.lower()
-    
-    classnames_map = {
-        'cifar100': CIFAR100_CLASS_NAMES,
-        'food101': FOOD101_CLASS_NAMES,
-        'flowers102': FLOWERS102_CLASS_NAMES,
-        'dtd': DESCRIBABLETEXTURES_CLASS_NAMES,
-        'eurosat': EUROSAT_CLASS_NAMES,
+def init_environment(args):
+    """Setup config, model, and metrics."""
+    default_configs = {
+        'clip': "configs/clip_baseline.yaml",
+        'clip_lora': "configs/clip_lora.yaml",
+        'frozen': "configs/frozen_clip.yaml"
     }
+    config_path = args.config if args.config else default_configs[args.model]
     
-    return classnames_map.get(dataset_name)
+    print(f"Loading config: {config_path}")
+    config = load_config_from_yaml(config_path, args.model)
+    config.device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
+    seed_everything(args.seed)
+    
+    print(f"Initializing {args.model.upper()}")
+    model = get_model(args.model, config)
+    
+    metrics = MetricsTracker(model_name=args.model.upper(), results_dir=Path(config.results_dir))
+    return model, config, metrics
 
-
-def load_benchmark_dataset(dataset_name, split, transform, config):
-    """Load a specific benchmark dataset."""
-    from datasets.benchmark_datasets import BenchmarkDatasets
-    
-    dataset_name_lower = dataset_name.lower()
-    cache_dir = config.cache_dir
-    
-    if dataset_name_lower == 'cifar100':
-        return BenchmarkDatasets.get_cifar100(cache_dir, transform, split)
-    elif dataset_name_lower == 'food101':
-        return BenchmarkDatasets.get_food101(cache_dir, transform, split)
-    elif dataset_name_lower == 'flowers102':
-        return BenchmarkDatasets.get_flowers102(cache_dir, transform, split)
-    elif dataset_name_lower == 'dtd':
-        return BenchmarkDatasets.get_dtd(cache_dir, transform, split)
-    elif dataset_name_lower == 'eurosat':
-        return BenchmarkDatasets.get_eurosat(cache_dir, transform)
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-
-
-def create_text_classifier(model, classnames, templates, device):
-    """
-    Create text classifier by encoding class names with templates.
-    Uses model.tokenize() for compatibility with both HF and OpenCLIP.
-    """
-    text_features = []
-    
-    with torch.no_grad():
-        for classname in classnames:
-            # Generate prompts
-            texts = [template.format(classname) for template in templates]
-            
-            # --- UPDATED: Use model's own tokenizer ---
-            # This works for the new CLIPBaseline/CLIPLoRA classes
-            tokenized_inputs = model.tokenize(texts)
-            
-            # Encode
-            class_embeddings = model.encode_text(tokenized_inputs)
-            
-            # Normalize
-            class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
-            
-            # Average over templates
-            class_embedding = class_embeddings.mean(dim=0)
-            class_embedding = class_embedding / class_embedding.norm()
-            
-            text_features.append(class_embedding)
-    
-    # Stack: [num_classes, embedding_dim]
-    text_classifier = torch.stack(text_features, dim=0).to(device)
-    
-    # Transpose for matmul: [embedding_dim, num_classes]
-    text_classifier = text_classifier.T
-    
-    return text_classifier
-
-
-def run_full_pipeline(model_name: str, config_path: str = None, datasets_to_eval=None):
-    """Run complete training and evaluation pipeline."""
-    model, config, metrics_tracker = initialize_model(model_name, config_path)
-    train_model(model, config, metrics_tracker)
-    model = load_model_checkpoint(model, model_name, config)
-    evaluate_model(model, config, metrics_tracker, datasets_to_eval)
-    metrics_tracker.save_metrics()
-    metrics_tracker.print_summary()
-
-def prepare_lora_model_for_evaluation(config):
-    """
-    Prepare LoRA model for evaluation by merging adapters if needed.
-    Ensures fair comparison by removing adapter hook overhead.
-    
-    Args:
-        config: CLIPLoRAConfig instance
-        
-    Returns:
-        Path to merged model or None if merge failed
-    """
-    from utils.model_merger import LoRAModelMerger
-    
-    merged_model_dir = Path(config.output_dir) / "merged_model"
-    
-    # Check if merged model already exists
-    if merged_model_dir.exists() and (merged_model_dir / "pytorch_model.bin").exists():
-        print(f"✅ Merged CLIP+LoRA model already exists at: {merged_model_dir}")
-        return merged_model_dir
-    
-    # Find latest LoRA checkpoint
-    try:
-        latest_checkpoint = LoRAModelMerger.find_latest_lora_checkpoint(
-            Path(config.output_dir)
-        )
-    except FileNotFoundError as e:
-        print(f"❌ {e}")
-        return None
-    
-    # Merge adapters into base model
-    try:
-        merged_dir = LoRAModelMerger.merge_and_save_lora(
-            base_model_id=config.model_id,
-            lora_checkpoint_dir=latest_checkpoint,
-            output_dir=merged_model_dir,
-            cache_dir=config.cache_dir
-        )
-        return merged_dir
-    except Exception as e:
-        print(f"❌ Failed to merge LoRA adapters: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-def load_model_checkpoint(model, model_name, config):
-    """Load trained checkpoint for evaluation."""
-    from peft import PeftModel
-    from models.clip_baseline import CLIPBaseline  # Import Baseline class
-    import copy
-    
+def load_checkpoint(model, model_name, config):
+    """Restores specific logic for LoRA merging vs Adapters."""
     if model_name == 'clip_lora':
-        checkpoint_dir = Path(config.output_dir)
+        from peft import PeftModel
+        from models.clip_baseline import CLIPBaseline
+        import copy
         
-        # ---------------------------------------------------------------------
-        # 1. Priority: Merged Model (Treat as Standard CLIP)
-        # ---------------------------------------------------------------------
-        # Looks for: /sda/usama/production_code/clip_lora_checkpoints/merged_model
+        checkpoint_dir = Path(config.output_dir)
         merged_path = checkpoint_dir / "merged_model"
         
+        # Priority 1: Merged Model
         if merged_path.exists() and (merged_path / "config.json").exists():
-            print(f"\n{'='*50}")
-            print(f"🔄 Found Merged Model at: {merged_path}")
-            print("Switching to CLIPBaseline for merged weights...")
-            print(f"{'='*50}")
-            
-            # Create a temporary config pointing to the merged model directory
+            print(f"Loading merged model: {merged_path}")
             merged_config = copy.copy(config)
             merged_config.model_id = str(merged_path)
+            return CLIPBaseline(merged_config)
             
-            # Instantiate a fresh CLIPBaseline model
-            # This handles loading the CLIPModel and Processor correctly from the folder
-            merged_model = CLIPBaseline(merged_config)
-            
-            # Return the new model (discarding the initial CLIPLoRA wrapper)
-            return merged_model
-
-        # ---------------------------------------------------------------------
-        # 2. Fallback: Standard LoRA Adapter Loading (Epochs)
-        # ---------------------------------------------------------------------
+        # Priority 2: Latest Adapter
         epoch_dirs = sorted(checkpoint_dir.glob("epoch_*"), key=lambda p: int(p.name.split('_')[-1]))
-        
-        if not epoch_dirs:
-            print(f"No checkpoints found in {checkpoint_dir}")
-            return model
-        
-        latest_checkpoint = epoch_dirs[-1]
-        print(f"Loading CLIP-LoRA checkpoint from: {latest_checkpoint}")
-        
-        # Use PeftModel to load adapter config and weights safely
-        model.model = PeftModel.from_pretrained(model.model.base_model, latest_checkpoint)
-        print("Loaded LoRA adapter weights & config")
-        
+        if epoch_dirs:
+            latest = epoch_dirs[-1]
+            print(f"Loading LoRA adapter: {latest}")
+            model.model = PeftModel.from_pretrained(model.model.base_model, latest)
+            
     elif model_name == 'frozen':
-        checkpoint_path = config.checkpoint_dir / "best_model.pt"
-        
-        if not checkpoint_path.exists():
-            print(f"No checkpoint found at {checkpoint_path}")
-            return model
-        
-        print(f"Loading Frozen checkpoint from: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=config.device)
-    
-        state_dict = checkpoint['model_state'] if isinstance(checkpoint, dict) and 'model_state' in checkpoint else checkpoint
-
-        try:
-            model.vision_encoder.load_state_dict(state_dict, strict=True)
-            print(f"✓ Loaded vision encoder (Strict Mode)")
-        except Exception as e:
-            print(f"⚠️ Strict loading failed: {e}. Retrying strict=False...")
-            model.vision_encoder.load_state_dict(state_dict, strict=False)
-    
+        ckpt = config.checkpoint_dir / "best_model.pt"
+        if ckpt.exists():
+            print(f"Loading checkpoint: {ckpt}")
+            sd = torch.load(ckpt, map_location=config.device)
+            # Handle nested state dict key if present
+            state = sd['model_state'] if 'model_state' in sd else sd
+            model.vision_encoder.load_state_dict(state, strict=False)
+            
     return model
 
+def load_dataset_helper(name, split, transform, config):
+    """Handles EuroSAT missing split argument."""
+    from datasets.benchmark_datasets import BenchmarkDatasets
+    cache = config.cache_dir
+    name = name.lower()
+    
+    if name == 'eurosat':
+        return BenchmarkDatasets.get_eurosat(cache, transform)
+    
+    loaders = {
+        'cifar100': BenchmarkDatasets.get_cifar100,
+        'food101': BenchmarkDatasets.get_food101,
+        'flowers102': BenchmarkDatasets.get_flowers102,
+        'dtd': BenchmarkDatasets.get_dtd,
+    }
+    return loaders[name](cache, transform, split)
+
+# --- MODES ---
+
+def run_train(args):
+    model, config, metrics = init_environment(args)
+    metrics.track_parameters(model)
+    
+    print(f"\n{'='*40}\nSTARTING TRAINING\n{'='*40}")
+    trainer = get_trainer(model, config, metrics)
+    trainer.train()
+    metrics.save_metrics()
+    print("Training Complete.")
+
+def run_evaluate(args):
+    model, config, metrics = init_environment(args)
+    model = load_checkpoint(model, args.model, config)
+    model.to(config.device)
+    model.eval()
+    
+    transform = TransformFactory.get_transform(model)
+    cache = FeatureCache(model, config)
+    evaluator = ModelEvaluator(model, config, metrics, cache)
+    
+    print(f"\n{'='*40}\nSTARTING EVALUATION\n{'='*40}")
+    for name in args.datasets:
+        print(f"\nEvaluating on {name.upper()}")
+        try:
+            train_ds = load_dataset_helper(name, 'train', transform, config)
+            test_ds = load_dataset_helper(name, 'test', transform, config)
+            
+            evaluator.evaluate_all(
+                train_ds, test_ds, 
+                get_classnames(name), 
+                get_templates(name), 
+                name
+            )
+        except Exception as e:
+            print(f"Failed to evaluate {name}: {e}")
+            import traceback; traceback.print_exc()
+
+    metrics.save_metrics()
+    print("Evaluation Complete.")
+
+def run_benchmark(args):
+    """
+    Run benchmarking. 
+    For CLIP LoRA, this runs TWO tests: Unmerged (Adapter) and Merged.
+    For Frozen, it runs the standard best checkpoint.
+    """
+    # 1. SPECIAL HANDLING: CLIP LOORA (Run Both)
+    if args.model == 'clip_lora':
+        print(f"\n{'='*60}")
+        print("BENCHMARK SUITE: CLIP LoRA (Adapter vs Merged)")
+        print(f"{'='*60}")
+
+        # --- A. Test Unmerged Adapter ---
+        print("\n>>> TEST 1: Unmerged Adapter (PeftModel)")
+        try:
+            # Initialize fresh using the correct function name
+            model, config, _ = init_environment(args)
+            
+            # Manual Adapter Load
+            checkpoint_dir = Path(config.output_dir)
+            epoch_dirs = sorted(checkpoint_dir.glob("epoch_*"), key=lambda p: int(p.name.split('_')[-1]))
+            
+            if epoch_dirs:
+                latest = epoch_dirs[-1]
+                print(f"Loading Adapter from: {latest}")
+                from peft import PeftModel
+                model.model = PeftModel.from_pretrained(model.model.base_model, latest)
+                
+                # Run Profile
+                _execute_profile(model, "CLIP_LoRA_Adapter", config)
+            else:
+                print("No adapter checkpoints found (epoch_*). Skipping Adapter test.")
+        except Exception as e:
+            print(f"Adapter benchmark failed: {e}")
+            import traceback; traceback.print_exc()
+
+        # --- B. Test Merged Model ---
+        print("\n>>> TEST 2: Merged Model (Standard Inference)")
+        try:
+            # Re-init just to get the clean config object
+            _, config, _ = init_environment(args)
+            checkpoint_dir = Path(config.output_dir)
+            merged_path = checkpoint_dir / "merged_model"
+            
+            if merged_path.exists():
+                print(f"Loading Merged Model from: {merged_path}")
+                import copy
+                from models.clip_baseline import CLIPBaseline
+                
+                # Create config pointing to merged path
+                merged_config = copy.copy(config)
+                merged_config.model_id = str(merged_path)
+                
+                # Load as standard CLIP
+                merged_model = CLIPBaseline(merged_config)
+                
+                # Run Profile
+                _execute_profile(merged_model, "CLIP_LoRA_Merged", merged_config)
+            else:
+                print("No 'merged_model' folder found. Skipping Merged test.")
+        except Exception as e:
+            print(f"Merged benchmark failed: {e}")
+            import traceback; traceback.print_exc()
+
+    # 2. STANDARD HANDLING: Frozen or CLIP Baseline
+    else:
+        model, config, _ = init_environment(args)
+        
+        # Load the specific checkpoint (best_model.pt for Frozen)
+        model = load_checkpoint(model, args.model, config)
+        
+        _execute_profile(model, args.model.upper(), config)
+
+
+def _execute_profile(model, run_name, config):
+    """Helper to run the profiler on a model."""
+    from evaluation.profiling import ModelProfiler
+    from torch.utils.data import DataLoader
+    from datasets.benchmark_datasets import BenchmarkDatasets
+    from utils.transforms import TransformFactory
+    
+    model.to(config.device)
+    model.eval()
+    
+    # 1. Get Transform
+    if hasattr(model, 'preprocess'):
+        transform = model.preprocess
+    elif hasattr(model, 'processor'):
+         def hf_transform(image):
+            if image.mode != "RGB": image = image.convert("RGB")
+            inputs = model.processor(images=image, return_tensors="pt")
+            return inputs['pixel_values'].squeeze(0)
+         transform = hf_transform
+    else:
+        from torchvision import transforms
+        transform = transforms.Compose([
+            transforms.Resize(224), transforms.CenterCrop(224),
+            transforms.ToTensor(), 
+            transforms.Normalize((0.481, 0.457, 0.408), (0.268, 0.261, 0.275))
+        ])
+
+    # 2. Load Data (CIFAR-100 Test)
+    test_ds = BenchmarkDatasets.get_cifar100(config.cache_dir, transform, 'test')
+    loader = DataLoader(test_ds, batch_size=config.batch_size, num_workers=config.num_workers)
+    
+    # 3. Profile
+    profiler = ModelProfiler(model, run_name, config)
+    results = profiler.profile(loader, num_samples=100) 
+    profiler.save_results(results)
+    profiler.print_summary(results)
 
 def main():
-    """Main execution function."""
     args = parse_args()
-    seed_everything(args.seed)
-    models = get_models_list(args.models)
-
-    print(f"\n{'='*60}")
-    print(f"MULTIMODAL FOUNDATION MODELS - {args.mode.upper()} MODE")
-    print(f"{'='*60}")
-    
-    for model_name in models:
-        try:
-            if args.mode == 'train':
-                model, config, metrics_tracker = initialize_model(model_name, args.config)
-                train_model(model, config, metrics_tracker)
-                metrics_tracker.save_metrics()
-
-            elif args.mode == 'evaluate':
-                model, config, metrics_tracker = initialize_model(model_name, args.config)
-                model = load_model_checkpoint(model, model_name, config)
-                evaluate_model(model, config, metrics_tracker, args.datasets)
-                metrics_tracker.save_metrics()
-
-
-            elif args.mode == 'full_pipeline':
-                run_full_pipeline(model_name, args.config, args.datasets)
-
-        except Exception as e:
-            print(f"\nERROR with {model_name}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
-
-    if len(models) > 1 and not args.no_plots:
-        print(f"\n{'='*60}")
-        print("Generating Comparison Plots")
-        try:
-            from utils.plotting import generate_comparison_plots
-            generate_comparison_plots(models, Path('results_attained'), Path('plots'))
-        except Exception as e:
-            print(f"Plot generation failed: {e}")
-
-    print(f"\n{'='*60}")
-    print("All tasks completed successfully!")
-    print(f"{'='*60}\n")
-
+    if args.mode == 'train': run_train(args)
+    elif args.mode == 'evaluate': run_evaluate(args)
+    elif args.mode == 'benchmark': run_benchmark(args)
 
 if __name__ == "__main__":
     main()

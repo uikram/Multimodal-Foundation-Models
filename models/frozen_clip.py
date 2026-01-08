@@ -8,6 +8,7 @@ import timm
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
+from utils.helpers import pad_to_square
 
 class VisionEncoder(nn.Module):
     """Vision encoder using ResNet-50 with projection."""
@@ -51,19 +52,8 @@ class FrozenCLIP(nn.Module):
         # Vision encoder
         print(f"Loading vision encoder: {config.vision_encoder_name}...")
         self.vision_encoder = VisionEncoder(config).to(config.device)
-        
-        # [PAPER FIX] Inference Preprocessing
-        def pad_to_square(img):
-            from PIL import Image
-            w, h = img.size
-            if w == h: return img
-            max_size = max(w, h)
-            new_img = Image.new('RGB', (max_size, max_size), (0, 0, 0))
-            new_img.paste(img, ((max_size - w) // 2, (max_size - h) // 2))
-            return new_img
-
         self.preprocess = transforms.Compose([
-            transforms.Lambda(pad_to_square), # <--- THE FIX
+            transforms.Lambda(pad_to_square), 
             transforms.Resize(224, interpolation=InterpolationMode.BICUBIC),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])

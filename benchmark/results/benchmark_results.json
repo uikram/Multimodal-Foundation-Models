@@ -4,35 +4,35 @@
         "total_params_M": 151.28,
         "trainable_params_M": 151.28,
         "peak_memory_MB": 309.81,
-        "visual_latency_ms": 7.23,
+        "visual_latency_ms": 15.81,
         "reasoning_latency_ms": null,
-        "throughput_imgs_sec": 138.41
+        "throughput_imgs_sec": 63.24
     },
     "LoRA": {
         "model": "LoRA",
         "total_params_M": 152.26,
         "trainable_params_M": 0.0,
         "peak_memory_MB": 323.44,
-        "visual_latency_ms": 10.56,
+        "visual_latency_ms": 14.93,
         "reasoning_latency_ms": null,
-        "throughput_imgs_sec": 94.74
+        "throughput_imgs_sec": 66.99
     },
     "Frozen": {
         "model": "Frozen",
         "total_params_M": 802.78,
         "trainable_params_M": 28.75,
         "peak_memory_MB": 3302.98,
-        "visual_latency_ms": 6.76,
-        "reasoning_latency_ms": 117.99,
-        "throughput_imgs_sec": 148.03
+        "visual_latency_ms": 14.31,
+        "reasoning_latency_ms": 199.55,
+        "throughput_imgs_sec": 69.89
     },
     "LoRA_Merged": {
         "model": "LoRA-CLIP (Merged)",
         "total_params_M": 151.28,
         "trainable_params_M": 151.28,
         "peak_memory_MB": 429.48,
-        "visual_latency_ms": 7.29,
+        "visual_latency_ms": 8.06,
         "reasoning_latency_ms": null,
-        "throughput_imgs_sec": 137.15
+        "throughput_imgs_sec": 124.08
     }
 }
