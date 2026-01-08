@@ -23,7 +23,6 @@ class FrozenTrainer:
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Optimizer (Vision Encoder only)
-        # FIX: Added betas=(0.9, 0.95) to match original script
         self.optimizer = torch.optim.Adam(
             self.model.vision_encoder.parameters(),
             lr=config.learning_rate,
@@ -59,28 +58,33 @@ class FrozenTrainer:
         print("="*60)
         
         for epoch in range(self.config.num_epochs):
-            # Pass val_loader to train_epoch for mid-epoch validation
+            # Train for one epoch with mid-epoch validation
             train_loss = self.train_epoch(epoch, train_loader, val_loader)
             
             # End of epoch validation
+            print(f"\nRunning End-of-Epoch Validation...")
             val_loss = self.validate(val_loader)
             self.metrics.track_epoch_metrics(epoch+1, train_loss=train_loss, val_loss=val_loss)
             
             print(f"\n{'='*60}")
             print(f"Epoch {epoch+1}/{self.config.num_epochs} Complete")
             print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+            print(f"Best Val Loss: {self.best_val_loss:.4f}")
             print(f"{'='*60}\n")
             
-            # Save epoch checkpoint
-            self.save_checkpoint(epoch, val_loss, is_best=False)
+            # Save epoch checkpoint (Only once per epoch!)
+            # Note: step_ckpt=False creates 'checkpoint_epoch_X.pt'
+            self.save_checkpoint(epoch, val_loss, is_best=False, step_ckpt=False)
             
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
-                self.save_checkpoint(epoch, val_loss, is_best=True)
+                self.save_checkpoint(epoch, val_loss, is_best=True, step_ckpt=False)
 
         self.metrics.end_training_timer()
         self.metrics.track_gpu_memory('post_training')
-        print("\n✅ Training Complete!")
+        print("\nTraining Complete!")
+        
+        return self.model
         
     def get_dataloaders(self):
         from datasets.dataloaders import FrozenConceptualCaptionsDataset
@@ -136,21 +140,24 @@ class FrozenTrainer:
         )
         
         for step, batch in enumerate(pbar):
+           
+            initial_global_step = self.global_step
+            
             loss = self.train_step(batch, step)
             epoch_loss += loss
-            pbar.set_postfix({'loss': f'{loss:.4f}'})
+            pbar.set_postfix({'loss': f'{loss:.4f}', 'step': self.global_step})
             
-            # Perform validation every 1000 GLOBAL steps
-            if self.global_step > 0 and self.global_step % 1000 == 0:
-                print(f"\n\n[Step {self.global_step}] Running Validation...")
+            if self.global_step > initial_global_step and self.global_step % 1000 == 0:
+                print(f"\n\n[Step {self.global_step}] Running Mid-Epoch Validation...")
                 val_loss = self.validate(val_loader)
                 print(f"[Step {self.global_step}] Val Loss: {val_loss:.4f}\n")
                 
-                self.save_checkpoint(epoch, val_loss, is_best=False)
+                # Save step checkpoint (step_ckpt=True creates 'checkpoint_step_X.pt')
+                self.save_checkpoint(epoch, val_loss, is_best=False, step_ckpt=True)
 
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
-                    self.save_checkpoint(epoch, val_loss, is_best=True)
+                    self.save_checkpoint(epoch, val_loss, is_best=True, step_ckpt=True)
                 
                 # Ensure model is back in train mode
                 self.model.train()
@@ -222,28 +229,32 @@ class FrozenTrainer:
         
         return total_loss / len(val_loader)
     
-    def save_checkpoint(self, epoch, val_loss, is_best=False):
-        """Save checkpoint."""
+    def save_checkpoint(self, epoch, val_loss, is_best=False, step_ckpt=False):
+        """Save checkpoint with clear distinction between step and epoch checkpoints."""
         checkpoint = {
             'epoch': epoch,
             'global_step': self.global_step,
             'model_state': self.model.vision_encoder.state_dict(),
             'optimizer_state': self.optimizer.state_dict(),
             'val_loss': val_loss,
+            'best_val_loss': self.best_val_loss,
             'config': vars(self.config)
         }
         
-        # 1. Save step-based checkpoint (Original behavior)
-        step_path = self.config.checkpoint_dir / f"checkpoint_step_{self.global_step}.pt"
-        torch.save(checkpoint, step_path)
+        # 1. Step Checkpoint (e.g., checkpoint_step_1000.pt)
+        if step_ckpt:
+            step_path = self.config.checkpoint_dir / f"checkpoint_step_{self.global_step}.pt"
+            torch.save(checkpoint, step_path)
+            print(f"Saved STEP checkpoint: {step_path.name}")
         
-        # 2. FIX: Also save epoch-based checkpoint for easier identification
-        epoch_path = self.config.checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pt"
-        torch.save(checkpoint, epoch_path)
-        print(f"  ✓ Saved epoch checkpoint to {epoch_path}")
+        # 2. Epoch Checkpoint (e.g., checkpoint_epoch_1.pt)
+        else:
+            epoch_path = self.config.checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pt"
+            torch.save(checkpoint, epoch_path)
+            print(f"Saved EPOCH checkpoint: {epoch_path.name}")
         
-        # 3. Save best model
+        # 3. Best Model (Always save if best)
         if is_best:
-            best_path = self.config.checkpoint_dir / "best_model.pt"
+            best_path = self.config.checkpoint_dir / "best_model_frozen.pt"
             torch.save(checkpoint, best_path)
-            print(f"  ✓ Saved best model to {best_path}")
+            print(f"Saved BEST model (val_loss: {val_loss:.4f})")
