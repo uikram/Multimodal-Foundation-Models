@@ -1,259 +1,172 @@
 """
 Advanced profiling utilities for model performance analysis.
+Compatible with main.py --mode benchmark.
 """
 
 import time
 import torch
-import psutil
 import numpy as np
-from typing import Dict, List, Callable
-from dataclasses import dataclass
-
-
-@dataclass
-class ProfileResults:
-    """Container for profiling results."""
-    avg_time_ms: float
-    std_time_ms: float
-    min_time_ms: float
-    max_time_ms: float
-    throughput: float  # samples/second
-    memory_allocated_mb: float
-    memory_reserved_mb: float
-
+import json
+from pathlib import Path
+from tqdm import tqdm
 
 class ModelProfiler:
-    """Advanced profiler for model performance analysis."""
+    """
+    Profiler for measuring Latency, Throughput, and Peak Memory.
+    """
     
-    def __init__(self, model, device='cuda'):
+    def __init__(self, model, model_name, config):
         self.model = model
-        self.device = device
+        self.model_name = model_name
+        self.config = config
+        self.device = config.device
+        self.output_dir = Path(config.results_dir) / 'benchmarks'
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         
-    def profile_inference(
-        self,
-        input_generator: Callable,
-        num_iterations: int = 100,
-        warmup_iterations: int = 10
-    ) -> ProfileResults:
+    def profile(self, dataloader, num_samples=100):
         """
-        Profile model inference performance.
-        
-        Args:
-            input_generator: Function that generates model inputs
-            num_iterations: Number of iterations to measure
-            warmup_iterations: Number of warmup iterations (not measured)
-        
-        Returns:
-            ProfileResults with timing and memory statistics
+        Run profiling on a dataloader.
         """
+        print(f"Profiling {self.model_name} on {self.device.upper()}...")
         self.model.eval()
-        times = []
+        self.model.to(self.device)
         
-        # Warmup
-        print(f"Warming up ({warmup_iterations} iterations)...")
-        with torch.no_grad():
-            for _ in range(warmup_iterations):
-                inputs = input_generator()
-                _ = self._forward(inputs)
+        latencies = []
+        peak_memory = 0.0
         
-        # Profile
-        print(f"Profiling ({num_iterations} iterations)...")
+        # Create an iterator that loops if dataset is too small
+        def infinite_loader():
+            while True:
+                for batch in dataloader:
+                    yield batch
+        
+        batch_iter = infinite_loader()
+        
+        # 1. Warmup
+        print("Warming up...")
         with torch.no_grad():
-            for _ in range(num_iterations):
-                inputs = input_generator()
-                
-                # Synchronize GPU
+            for _ in range(5):
+                batch = next(batch_iter)
+                self._run_forward(batch)
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
-                
-                start = time.perf_counter()
-                _ = self._forward(inputs)
-                
-                # Synchronize GPU
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                
-                elapsed = (time.perf_counter() - start) * 1000  # ms
-                times.append(elapsed)
         
-        # Get memory stats
+        # 2. Measure Memory (Reset before run)
         if torch.cuda.is_available():
-            memory_allocated = torch.cuda.memory_allocated() / 1024 / 1024
-            memory_reserved = torch.cuda.memory_reserved() / 1024 / 1024
-        else:
-            memory_allocated = 0
-            memory_reserved = 0
-        
-        # Calculate statistics
-        times = np.array(times)
-        avg_time = float(np.mean(times))
-        throughput = 1000.0 / avg_time  # samples per second
-        
-        return ProfileResults(
-            avg_time_ms=avg_time,
-            std_time_ms=float(np.std(times)),
-            min_time_ms=float(np.min(times)),
-            max_time_ms=float(np.max(times)),
-            throughput=throughput,
-            memory_allocated_mb=memory_allocated,
-            memory_reserved_mb=memory_reserved
-        )
-    
-    def _forward(self, inputs):
-        """Forward pass handling different input types."""
-        if isinstance(inputs, dict):
-            return self.model(**inputs)
-        elif isinstance(inputs, (list, tuple)):
-            return self.model(*inputs)
-        else:
-            return self.model(inputs)
-    
-    def profile_batch_sizes(
-        self,
-        input_generator_factory: Callable[[int], Callable],
-        batch_sizes: List[int] = [1, 2, 4, 8, 16, 32, 64, 128],
-        num_iterations: int = 50
-    ) -> Dict[int, ProfileResults]:
-        """
-        Profile model across different batch sizes.
-        
-        Args:
-            input_generator_factory: Function that takes batch_size and returns input_generator
-            batch_sizes: List of batch sizes to test
-            num_iterations: Number of iterations per batch size
-        
-        Returns:
-            Dictionary mapping batch_size -> ProfileResults
-        """
-        results = {}
-        
-        for batch_size in batch_sizes:
-            print(f"\nProfiling batch size: {batch_size}")
-            try:
-                input_gen = input_generator_factory(batch_size)
-                result = self.profile_inference(input_gen, num_iterations)
-                results[batch_size] = result
-                
-                print(f"  Avg time: {result.avg_time_ms:.2f}ms")
-                print(f"  Throughput: {result.throughput * batch_size:.2f} samples/sec")
-                print(f"  Memory: {result.memory_allocated_mb:.2f}MB")
-                
-            except RuntimeError as e:
-                if "out of memory" in str(e):
-                    print(f"  ✗ Out of memory at batch size {batch_size}")
-                    break
-                else:
-                    raise
-        
-        return results
-    
-    def compare_models(
-        self,
-        models: Dict[str, torch.nn.Module],
-        input_generator: Callable,
-        num_iterations: int = 100
-    ) -> Dict[str, ProfileResults]:
-        """
-        Compare performance across multiple models.
-        
-        Args:
-            models: Dictionary of model_name -> model
-            input_generator: Function that generates inputs
-            num_iterations: Number of iterations per model
-        
-        Returns:
-            Dictionary mapping model_name -> ProfileResults
-        """
-        results = {}
-        
-        for name, model in models.items():
-            print(f"\nProfiling {name}...")
-            profiler = ModelProfiler(model, self.device)
-            result = profiler.profile_inference(input_generator, num_iterations)
-            results[name] = result
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.empty_cache()
             
-            print(f"  Avg time: {result.avg_time_ms:.2f}ms")
-            print(f"  Throughput: {result.throughput:.2f} samples/sec")
+        # 3. Profile Loop
+        print(f"  Measuring metrics over {num_samples} samples...")
+        pbar = tqdm(total=num_samples, desc="Profiling")
+        
+        current_samples = 0
+        with torch.no_grad():
+            while current_samples < num_samples:
+                batch = next(batch_iter)
+                batch_size = self._get_batch_size(batch)
+                
+                # Timer start
+                if torch.cuda.is_available(): torch.cuda.synchronize()
+                start_time = time.perf_counter()
+                
+                self._run_forward(batch)
+                
+                # Timer end
+                if torch.cuda.is_available(): torch.cuda.synchronize()
+                end_time = time.perf_counter()
+                
+                # Record Latency (ms)
+                latencies.append((end_time - start_time) * 1000)
+                
+                current_samples += batch_size
+                pbar.update(batch_size)
+                
+                if current_samples >= num_samples:
+                    break
+        
+        pbar.close()
+        
+        # 4. Capture Peak Memory
+        if torch.cuda.is_available():
+            peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 2) # MB
+        
+        # Calculate Stats
+        avg_latency = np.mean(latencies)
+        throughput = (1000.0 / avg_latency) * self.config.batch_size # images/sec
+        
+        results = {
+            "model": self.model_name,
+            "device": self.device,
+            "samples": current_samples,
+            "latency_avg_ms": round(avg_latency, 2),
+            "latency_p95_ms": round(np.percentile(latencies, 95), 2),
+            "throughput_imgs_sec": round(throughput, 2),
+            "peak_memory_mb": round(peak_memory, 2)
+        }
         
         return results
 
+    def _get_batch_size(self, batch):
+        """Helper to get batch size from dict or list."""
+        if isinstance(batch, dict):
+            # Try common keys
+            for k in ['images', 'pixel_values', 'input_ids']:
+                if k in batch: return batch[k].size(0)
+            return list(batch.values())[0].size(0)
+        elif isinstance(batch, (list, tuple)):
+            return batch[0].size(0)
+        return 1
 
-class MemoryProfiler:
-    """Memory usage profiler."""
-    
-    @staticmethod
-    def get_gpu_memory() -> Dict[str, float]:
-        """Get current GPU memory usage."""
-        if not torch.cuda.is_available():
-            return {'allocated_mb': 0, 'reserved_mb': 0, 'free_mb': 0}
-        
-        allocated = torch.cuda.memory_allocated() / 1024 / 1024
-        reserved = torch.cuda.memory_reserved() / 1024 / 1024
-        total = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
-        free = total - allocated
-        
-        return {
-            'allocated_mb': allocated,
-            'reserved_mb': reserved,
-            'free_mb': free,
-            'total_mb': total
-        }
-    
-    @staticmethod
-    def get_cpu_memory() -> Dict[str, float]:
-        """Get current CPU memory usage."""
-        process = psutil.Process()
-        mem_info = process.memory_info()
-        
-        return {
-            'rss_mb': mem_info.rss / 1024 / 1024,  # Resident Set Size
-            'vms_mb': mem_info.vms / 1024 / 1024,  # Virtual Memory Size
-        }
-    
-    @staticmethod
-    def print_memory_summary():
-        """Print formatted memory summary."""
-        gpu_mem = MemoryProfiler.get_gpu_memory()
-        cpu_mem = MemoryProfiler.get_cpu_memory()
-        
-        print("\n" + "="*60)
-        print("MEMORY SUMMARY")
-        print("="*60)
-        
-        if gpu_mem['allocated_mb'] > 0:
-            print("\nGPU Memory:")
-            print(f"  Allocated: {gpu_mem['allocated_mb']:.2f} MB")
-            print(f"  Reserved:  {gpu_mem['reserved_mb']:.2f} MB")
-            print(f"  Free:      {gpu_mem['free_mb']:.2f} MB")
-            print(f"  Total:     {gpu_mem['total_mb']:.2f} MB")
+    def _run_forward(self, batch):
+        """Handle moving to device and forward pass."""
+        # Move to device
+        if isinstance(batch, dict):
+            batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        elif isinstance(batch, (list, tuple)):
+            batch = [x.to(self.device) if isinstance(x, torch.Tensor) else x for x in batch]
         else:
-            print("\nGPU: Not available")
-        
-        print("\nCPU Memory:")
-        print(f"  RSS: {cpu_mem['rss_mb']:.2f} MB")
-        print(f"  VMS: {cpu_mem['vms_mb']:.2f} MB")
-        print("="*60 + "\n")
+            batch = batch.to(self.device)
 
+        # Forward
+        if isinstance(batch, dict):
+            # FrozenCLIP might expect specific args
+            if hasattr(self.model, 'vision_encoder') and 'images' in batch:
+                self.model(
+                    images=batch['images'], 
+                    input_ids=batch.get('input_ids'), 
+                    attention_mask=batch.get('attention_mask'),
+                    labels=batch.get('labels')
+                )
+            else:
+                self.model(**batch)
+        elif hasattr(self.model, 'encode_image'):
+             # CLIP models
+            if isinstance(batch, (list, tuple)):
+                 self.model.encode_image(batch[0])
+            else:
+                 self.model.encode_image(batch)
+        else:
+            # Fallback
+            if isinstance(batch, (list, tuple)):
+                self.model(*batch)
+            else:
+                self.model(batch)
 
-# Example usage functions
+    def save_results(self, results):
+        """Save results to JSON."""
+        filename = f"{self.model_name}_benchmark.json"
+        save_path = self.output_dir / filename
+        with open(save_path, 'w') as f:
+            json.dump(results, f, indent=4)
+        print(f"Results saved to {save_path}")
 
-def example_clip_profiling():
-    """Example: Profile CLIP model."""
-    from models.clip_baseline import CLIPBaseline
-    from utils.config import CLIPConfig
-    
-    config = CLIPConfig()
-    model = CLIPBaseline(config)
-    profiler = ModelProfiler(model, config.device)
-    
-    # Define input generator
-    def input_gen():
-        dummy_image = torch.randn(1, 3, 224, 224).to(config.device)
-        return (dummy_image,)
-    
-    # Profile
-    results = profiler.profile_inference(input_gen, num_iterations=100)
-    
-    print(f"\nAverage inference time: {results.avg_time_ms:.2f}ms")
-    print(f"Throughput: {results.throughput:.2f} samples/sec")
-    print(f"Memory allocated: {results.memory_allocated_mb:.2f}MB")
+    def print_summary(self, results):
+        """Print pretty summary."""
+        print("\n" + "="*40)
+        print(f"BENCHMARK RESULTS: {results['model']}")
+        print("="*40)
+        print(f"Latency (Avg):    {results['latency_avg_ms']} ms")
+        print(f"Throughput:       {results['throughput_imgs_sec']} img/sec")
+        print(f"Peak Memory:      {results['peak_memory_mb']} MB")
+        print("="*40 + "\n")

@@ -12,7 +12,6 @@ system:
   num_workers: 4
   seed: 42
 
-# Data paths - SIMPLE STRUCTURE
 data:
   # Root directory
   data_root: "../conceptual_captions_data"

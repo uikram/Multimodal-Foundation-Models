@@ -120,7 +120,7 @@ EUROSAT_CLASS_NAMES = [
     'lake or sea',                                      # SeaLake
 ]
 
-DESCRIBEABLETEXTURES_CLASS_NAMES = [
+DESCRIBABLETEXTURES_CLASS_NAMES = [
     'banded',
     'blotchy',
     'braided',
@@ -299,7 +299,7 @@ FLOWERS102_CLASS_NAMES = [
 
 
 # --- Prompt Templates ---
-DESCRIBEABLETEXTURES_TEMPLATES = [
+DESCRIBABLETEXTURES_TEMPLATES = [
     'a photo of a {} texture.',
     'a photo of a {} pattern.',
     'a photo of a {} thing.',
@@ -343,3 +343,35 @@ CIFAR100_TEMPLATES = [
     'a photo of the small {}.',
     'a photo of the big {}.',
 ]
+
+def get_classnames(dataset_name):
+    """Get class names for a specific dataset."""
+    dataset_name = dataset_name.lower()
+    classnames_map = {
+        'cifar100': CIFAR100_CLASS_NAMES,
+        'food101': FOOD101_CLASS_NAMES,
+        'flowers102': FLOWERS102_CLASS_NAMES,
+        'dtd': DESCRIBABLETEXTURES_CLASS_NAMES,
+        'eurosat': EUROSAT_CLASS_NAMES,
+    }
+    if dataset_name not in classnames_map:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
+    return classnames_map[dataset_name]
+
+def get_templates(dataset_name):
+    """Get prompt templates for a specific dataset."""
+    dataset_name = dataset_name.lower()
+    templates_map = {
+        'cifar100': CIFAR100_TEMPLATES,
+        'food101': FOOD101_TEMPLATES,
+        'flowers102': FLOWERS102_TEMPLATES,
+        'dtd': DESCRIBABLETEXTURES_TEMPLATES,
+        'eurosat': EUROSAT_TEMPLATES,
+    }
+    if dataset_name not in templates_map:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
+    return templates_map[dataset_name]
+
+def get_dataset_info(dataset_name):
+    """Get both class names and templates."""
+    return get_classnames(dataset_name), get_templates(dataset_name)

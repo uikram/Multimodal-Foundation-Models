@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 from PIL import Image
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision.datasets import CIFAR100, Food101, Flowers102, DTD, EuroSAT
 from torchvision import transforms
 from tqdm import tqdm
+from utils.helpers import pad_to_square
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -21,16 +22,20 @@ class ConceptualCaptionsDataset(Dataset):
     Auto-fixes corrupted JSONL files on-the-fly.
     """
     
-    def __init__(self, config, processor):
+    def __init__(self, config, processor, debug_mode=False, max_samples=None):
         self.image_dir = Path(config.image_dir)
         self.processor = processor
         self.max_length = config.max_length
         self.samples = []
+        self.debug_mode = debug_mode
         
         annotation_file = Path(config.annotation_file)
         
         print(f"Loading annotations from: {annotation_file}")
         print(f"Image directory: {self.image_dir}")
+        
+        if debug_mode:
+            print("🔧 DEBUG MODE: Loading limited samples for testing")
         
         if not annotation_file.exists():
             raise FileNotFoundError(f"Annotation file not found: {annotation_file}")
@@ -40,7 +45,11 @@ class ConceptualCaptionsDataset(Dataset):
         
         # Parse JSONL with robust error handling and line cleaning
         with open(annotation_file, 'r', encoding='utf-8', errors='ignore') as f:
-            for line_num, raw_line in enumerate(tqdm(f, desc="Loading samples"), 1):
+            for line_num, raw_line in enumerate(tqdm(f, desc="Loading samples", disable=debug_mode), 1):
+                # In debug mode, limit samples
+                if debug_mode and max_samples and len(self.samples) >= max_samples:
+                    break
+                    
                 # Clean the line
                 line = raw_line.strip()
                 if not line:
@@ -71,11 +80,11 @@ class ConceptualCaptionsDataset(Dataset):
                 
                 except json.JSONDecodeError as e:
                     if line_num <= 10:
-                        print(f"  ⚠️  Skipped line {line_num}: {str(e)[:50]}")
+                        print(f"Skipped line {line_num}: {str(e)[:50]}")
                     continue
         
         if len(self.samples) == 0:
-            raise ValueError(f"❌ No valid samples found in {annotation_file}. Check JSON format!")
+            raise ValueError(f"No valid samples found in {annotation_file}. Check JSON format!")
         
         print(f"✓ Loaded {len(self.samples):,} samples")
     
@@ -85,7 +94,7 @@ class ConceptualCaptionsDataset(Dataset):
     def __getitem__(self, idx):
         """Get a single sample with retry logic."""
         attempts = 0
-        max_attempts = len(self.samples)
+        max_attempts = min(100, len(self.samples))  # Limit retry attempts
         
         while attempts < max_attempts:
             current_idx = (idx + attempts) % len(self.samples)
@@ -119,10 +128,12 @@ class ConceptualCaptionsDataset(Dataset):
                 }
             
             except Exception as e:
+                if self.debug_mode and attempts < 5:
+                    print(f"Error loading {image_path}: {e}")
                 attempts += 1
                 continue
         
-        raise RuntimeError(f"Failed to load sample after {max_attempts} attempts")
+        raise RuntimeError(f"Failed to load sample after {max_attempts} attempts starting from idx {idx}")
 
 
 # ===== Conceptual Captions Dataset for Frozen Model =====
@@ -133,21 +144,19 @@ class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
     Auto-fixes corrupted JSONL files on-the-fly.
     """
     
-    def __init__(self, image_dir, annotation_file, tokenizer, config):
+    def __init__(self, image_dir, annotation_file, tokenizer, config, debug_mode=False, max_samples=None):
         from torchvision import transforms
         
         self.image_dir = Path(image_dir)
         self.tokenizer = tokenizer
         self.config = config
-        
-        # Image transforms (ResNet normalization)
+        self.debug_mode = debug_mode
         self.transform = transforms.Compose([
-            transforms.Resize((config.image_size, config.image_size)),
+            transforms.Lambda(pad_to_square), 
+            transforms.Resize((config.image_size, config.image_size), interpolation=transforms.InterpolationMode.BICUBIC), 
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
-        
         # Load annotations with robust error handling
         self.samples = []
         annotation_path = Path(annotation_file)
@@ -155,16 +164,39 @@ class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
         print(f"[FrozenDataset] Loading annotations from: {annotation_path}")
         print(f"[FrozenDataset] Image directory: {self.image_dir}")
         
+        if debug_mode:
+            print("🔧 [FrozenDataset] DEBUG MODE: Loading limited samples for testing")
+        
         if not annotation_path.exists():
             raise FileNotFoundError(f"Annotation file not found: {annotation_path}")
         
         if not self.image_dir.exists():
+            print(f"[FrozenDataset] Image directory not found: {self.image_dir}")
+            # Try to create it or suggest alternatives
+            parent_dir = self.image_dir.parent
+            if parent_dir.exists():
+                available_dirs = [d.name for d in parent_dir.iterdir() if d.is_dir()]
+                print(f"    Available directories in {parent_dir}:")
+                for d in available_dirs[:10]:
+                    print(f"      - {d}")
             raise FileNotFoundError(f"Image directory not found: {self.image_dir}")
+        
+        # 🔍 Inspect JSONL in debug mode
+        if debug_mode:
+            inspect_jsonl_file(annotation_path, max_lines=3)
         
         # Parse JSONL with on-the-fly corruption fixes
         error_count = 0
+        valid_image_count = 0
+        missing_image_count = 0
+        
         with open(annotation_path, 'r', encoding='utf-8', errors='ignore') as f:
             for line_num, raw_line in enumerate(f, 1):
+                # In debug mode, limit samples
+                if debug_mode and max_samples and len(self.samples) >= max_samples:
+                    print(f"[FrozenDataset] Reached max_samples limit: {max_samples}")
+                    break
+                
                 # Clean the line
                 line = raw_line.strip()
                 if not line:
@@ -188,10 +220,24 @@ class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
                     )
                     
                     if caption and rel_path:
-                        self.samples.append({
-                            "caption": caption,
-                            "image_path": rel_path
-                        })
+                        # In debug mode, verify image exists before adding
+                        if debug_mode:
+                            test_path = self.image_dir / rel_path
+                            if test_path.exists():
+                                self.samples.append({
+                                    "caption": caption,
+                                    "image_path": rel_path
+                                })
+                                valid_image_count += 1
+                            else:
+                                missing_image_count += 1
+                                if missing_image_count <= 3:
+                                    print(f"  ⚠️  Missing: {test_path}")
+                        else:
+                            self.samples.append({
+                                "caption": caption,
+                                "image_path": rel_path
+                            })
                     
                 except json.JSONDecodeError as e:
                     error_count += 1
@@ -199,20 +245,33 @@ class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
                         print(f"[FrozenDataset] ⚠️  Skipped line {line_num}: {str(e)[:50]}")
                     continue
         
+        # More informative error message
         if len(self.samples) == 0:
-            raise ValueError(
-                f"❌ No valid samples found in {annotation_path}.\n"
-                f"   Total lines with errors: {error_count}\n"
-                f"   Check JSON format and image paths!"
-            )
+            error_msg = f"No valid samples found in {annotation_path}.\n"
+            error_msg += f"   Total lines with JSON errors: {error_count}\n"
+            if debug_mode:
+                error_msg += f"   Images missing from disk: {missing_image_count}\n"
+            error_msg += f"   Image directory checked: {self.image_dir}\n"
+            error_msg += f"\n   Possible issues:\n"
+            error_msg += f"   1. JSONL file may be empty or corrupted\n"
+            error_msg += f"   2. Image paths in JSONL don't match actual file locations\n"
+            error_msg += f"   3. Wrong image_dir path in config\n"
+            error_msg += f"\n   Run with debug_mode=True to see detailed inspection."
+            raise ValueError(error_msg)
         
-        print(f"[FrozenDataset] ✓ Loaded {len(self.samples):,} samples ({error_count} errors/skipped)")
+        print(f"[FrozenDataset] ✓ Loaded {len(self.samples):,} samples ({error_count} JSON errors)")
+        if debug_mode:
+            print(f"[FrozenDataset] ✓ Verified {valid_image_count} images exist on disk")
+            if missing_image_count > 0:
+                print(f"[FrozenDataset] {missing_image_count} images missing from disk")
         
-        # Verify first image exists
-        first_path = self.image_dir / self.samples[0]["image_path"]
-        if not first_path.exists():
-            print(f"[FrozenDataset] ⚠️  First image not found: {first_path}")
-            print(f"[FrozenDataset]    Using fallback retry logic during training...")
+        # Verify first few images exist
+        if len(self.samples) > 0:
+            print(f"[FrozenDataset] Verifying first 3 image paths...")
+            for i in range(min(3, len(self.samples))):
+                test_path = self.image_dir / self.samples[i]["image_path"]
+                status = "✓" if test_path.exists() else "✗"
+                print(f"  {status} {test_path}")
 
     def __len__(self):
         return len(self.samples)
@@ -220,7 +279,7 @@ class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         """Get a single sample with intelligent retry logic."""
         attempts = 0
-        max_attempts = len(self.samples)
+        max_attempts = min(100, len(self.samples))  # Limit retry attempts
         
         while attempts < max_attempts:
             current_idx = (idx + attempts) % len(self.samples)
@@ -229,6 +288,8 @@ class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
             
             try:
                 if not image_path.exists():
+                    if self.debug_mode and attempts < 5:
+                        print(f"⚠️  Image not found: {image_path}")
                     attempts += 1
                     continue
                     
@@ -239,7 +300,7 @@ class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
                     
                 image = self.transform(image)
                 
-                # Tokenize caption
+                # ✅ FIX: Tokenize caption with proper label masking
                 caption_encoded = self.tokenizer(
                     item["caption"],
                     max_length=self.config.max_caption_length,
@@ -248,13 +309,23 @@ class FrozenConceptualCaptionsDataset(torch.utils.data.Dataset):
                     return_tensors="pt"
                 )
                 
+                input_ids = caption_encoded["input_ids"].squeeze(0)
+                attention_mask = caption_encoded["attention_mask"].squeeze(0)
+                
+                # ✅ CRITICAL FIX: Mask padding tokens in labels
+                labels = input_ids.clone()
+                labels[attention_mask == 0] = -100  # Ignore padding in loss
+                
                 return {
                     "images": image,
-                    "input_ids": caption_encoded["input_ids"].squeeze(0),
-                    "attention_mask": caption_encoded["attention_mask"].squeeze(0),
-                    "labels": caption_encoded["input_ids"].squeeze(0)
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "labels": labels  # ← Now properly masked!
                 }
+                
             except Exception as e:
+                if self.debug_mode and attempts < 5:
+                    print(f"⚠️  Error loading {image_path}: {e}")
                 attempts += 1
                 continue
         
@@ -334,22 +405,23 @@ class DatasetFactory:
 
 # ===== Dataloader Functions =====
 
-def get_conceptual_captions_loader(config, processor):
+def get_conceptual_captions_loader(config, processor, debug_mode=False):
     """Get Conceptual Captions dataloader for CLIP+LoRA."""
-    dataset = ConceptualCaptionsDataset(config, processor)
+    max_samples = 500 if debug_mode else None
+    dataset = ConceptualCaptionsDataset(config, processor, debug_mode=debug_mode, max_samples=max_samples)
     
     loader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=True,
-        num_workers=config.num_workers,
+        num_workers=config.num_workers if not debug_mode else 0,  # Single worker in debug
         pin_memory=True
     )
     
     return loader
 
 
-def get_frozen_dataset_loader(config):
+def get_frozen_dataset_loader(config, debug_mode=False):
     """Get Conceptual Captions dataloaders for Frozen model."""
     from transformers import GPT2Tokenizer
     
@@ -357,22 +429,30 @@ def get_frozen_dataset_loader(config):
     tokenizer = GPT2Tokenizer.from_pretrained(config.language_model_name)
     tokenizer.pad_token = tokenizer.eos_token
     
+    # Limit samples in debug mode
+    max_samples = 500 if debug_mode else None
+    
     print("[FrozenDataLoader] Initializing training dataset...")
     # Create train dataset
     train_dataset = FrozenConceptualCaptionsDataset(
         config.train_image_dir,
         config.train_file,
         tokenizer,
-        config
+        config,
+        debug_mode=debug_mode,
+        max_samples=max_samples
     )
     
     print("[FrozenDataLoader] Initializing validation dataset...")
-    # Create val dataset
+    # Create val dataset (smaller in debug mode)
+    val_max_samples = 100 if debug_mode else None
     val_dataset = FrozenConceptualCaptionsDataset(
         config.val_image_dir,
         config.val_file,
         tokenizer,
-        config
+        config,
+        debug_mode=debug_mode,
+        max_samples=val_max_samples
     )
     
     # Create dataloaders
@@ -380,7 +460,7 @@ def get_frozen_dataset_loader(config):
         train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
-        num_workers=config.num_workers,
+        num_workers=config.num_workers if not debug_mode else 0,  # Single worker in debug
         pin_memory=True,
         drop_last=True  # Drop incomplete batches
     )
@@ -389,7 +469,7 @@ def get_frozen_dataset_loader(config):
         val_dataset,
         batch_size=config.batch_size,
         shuffle=False,
-        num_workers=config.num_workers,
+        num_workers=config.num_workers if not debug_mode else 0,
         pin_memory=True,
         drop_last=False
     )
@@ -397,3 +477,30 @@ def get_frozen_dataset_loader(config):
     print(f"[FrozenDataLoader] ✓ Train: {len(train_loader)} batches | Val: {len(val_loader)} batches")
     
     return train_loader, val_loader
+
+def inspect_jsonl_file(filepath, max_lines=5):
+    """Inspect JSONL file and print sample entries for debugging."""
+    print(f"\n🔍 Inspecting: {filepath}")
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = [line.strip() for line in f if line.strip()]
+            print(f"  Total lines: {len(lines)}")
+            
+            if len(lines) == 0:
+                print("File is empty!")
+                return
+            
+            print(f"  First {min(max_lines, len(lines))} entries:")
+            for i, line in enumerate(lines[:max_lines]):
+                try:
+                    entry = json.loads(line)
+                    print(f"    [{i+1}] Keys: {list(entry.keys())}")
+                    # Show first entry in detail
+                    if i == 0:
+                        for key, val in entry.items():
+                            val_str = str(val)[:60] + "..." if len(str(val)) > 60 else str(val)
+                            print(f"        {key}: {val_str}")
+                except json.JSONDecodeError as e:
+                    print(f"    [{i+1}] ✗ JSON Error: {str(e)[:50]}")
+    except Exception as e:
+        print(f"  ✗ Error reading file: {e}")

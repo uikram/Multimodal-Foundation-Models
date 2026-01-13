@@ -11,7 +11,8 @@ class CLIPLoRA:
         self.config = config
         self.device = config.device
         
-        print(f"Loading CLIP + LoRA: {config.model_id}")
+        # --- FIX: Use config.model_id (not model_name) ---
+        print(f"Loading CLIP + LoRA (Hugging Face): {config.model_id}")
         
         # Load processor
         self.processor = CLIPProcessor.from_pretrained(
@@ -19,10 +20,11 @@ class CLIPLoRA:
             cache_dir=config.cache_dir
         )
         
-        # Load base model
+        # Load base model with float16
         base_model = CLIPModel.from_pretrained(
-            config.model_id,
-            cache_dir=config.cache_dir
+            config.model_id,  # <--- FIXED (was config.model_name)
+            cache_dir=config.cache_dir,
+            torch_dtype=torch.float16  # <--- Added for speed/memory
         )
         
         # Configure LoRA
@@ -40,29 +42,53 @@ class CLIPLoRA:
         
         print("LoRA Configuration:")
         self.model.print_trainable_parameters()
+
+    def tokenize(self, texts):
+        """
+        Tokenize texts using the model's processor.
+        Returns a dictionary containing input_ids and attention_mask.
+        """
+        inputs = self.processor(
+            text=texts, 
+            padding=True, 
+            truncation=True, 
+            return_tensors="pt"
+        )
+        return {k: v.to(self.device) for k, v in inputs.items()}
         
     def forward(self, **kwargs):
         """Forward pass through the model."""
         return self.model(**kwargs, return_loss=True)
     
     def eval(self):
-        """Set model to evaluation mode."""
         self.model.eval()
         
     def train(self):
-        """Set model to training mode."""
         self.model.train()
         
     def parameters(self):
-        """Return model parameters."""
         return self.model.parameters()
     
     def count_parameters(self):
-        """Count total and trainable parameters."""
         total = sum(p.numel() for p in self.model.parameters())
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         return {'total': total, 'trainable': trainable}
     
     def save_pretrained(self, path):
-        """Save LoRA adapter weights."""
         self.model.save_pretrained(path)
+
+    def to(self, device):
+        self.device = device
+        self.model = self.model.to(device)
+        return self
+    
+    def encode_image(self, images):
+        vision_outputs = self.model.get_image_features(pixel_values=images)
+        return vision_outputs
+    
+    def encode_text(self, tokenized_inputs):
+        """Encode text using input_ids and attention_mask."""
+        if isinstance(tokenized_inputs, dict):
+            return self.model.get_text_features(**tokenized_inputs)
+        else:
+            return self.model.get_text_features(input_ids=tokenized_inputs)
