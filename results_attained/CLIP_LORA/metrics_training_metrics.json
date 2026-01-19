@@ -1,0 +1,40 @@
+{
+    "model_name": "CLIP_LORA",
+    "timestamp": "2026-01-16T23:28:18.332337",
+    "parameters": {
+        "total_parameters": 155700993,
+        "trainable_parameters": 4423680,
+        "frozen_parameters": 151277313,
+        "trainable_percentage": 2.8411
+    },
+    "memory": {
+        "pre_training_current_gpu_mb": 312.92,
+        "pre_training_peak_gpu_mb": 312.92,
+        "pre_training_reserved_gpu_mb": 334.0,
+        "post_training_current_gpu_mb": 379.79,
+        "post_training_peak_gpu_mb": 3907.37,
+        "post_training_reserved_gpu_mb": 4112.0
+    },
+    "latency": {},
+    "training_time": {
+        "total_seconds": 42441.01,
+        "total_minutes": 707.35,
+        "total_hours": 11.7892
+    },
+    "evaluation_results": {},
+    "training_history": {
+        "epochs": [
+            1,
+            2,
+            3
+        ],
+        "train_loss": [
+            0.1615907476248781,
+            0.1120841383732521,
+            0.09444002274875192
+        ],
+        "val_loss": [],
+        "train_accuracy": [],
+        "val_accuracy": []
+    }
+}
