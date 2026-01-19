@@ -61,28 +61,43 @@ def load_checkpoint(model, model_name, config):
         import copy
         
         checkpoint_dir = Path(config.output_dir)
+        best_model_path = checkpoint_dir / "best_model"
         merged_path = checkpoint_dir / "merged_model"
         
-        # Priority 1: Merged Model
+        # # Priority 1: Best Model (Explicitly requested)
+        # if best_model_path.exists():
+        #     print(f"Loading LoRA adapter (Best Model): {best_model_path}")
+        #     # FIX: Use load_adapter on the existing PeftModel instead of wrapping it again
+        #     # This ensures we overwrite the random init weights with the trained ones
+        #     try:
+        #         model.model.load_adapter(best_model_path, adapter_name="best")
+        #         model.model.set_adapter("best")
+        #         return model
+        #     except Exception as e:
+        #         print(f"Error loading best model adapter: {e}")
+        #         print("Falling back to other checkpoints...")
+
+        # Priority 2: Merged Model
         if merged_path.exists() and (merged_path / "config.json").exists():
             print(f"Loading merged model: {merged_path}")
             merged_config = copy.copy(config)
             merged_config.model_id = str(merged_path)
             return CLIPBaseline(merged_config)
             
-        # Priority 2: Latest Adapter
+        # Priority 3: Latest Adapter
         epoch_dirs = sorted(checkpoint_dir.glob("epoch_*"), key=lambda p: int(p.name.split('_')[-1]))
         if epoch_dirs:
             latest = epoch_dirs[-1]
             print(f"Loading LoRA adapter: {latest}")
-            model.model = PeftModel.from_pretrained(model.model.base_model, latest)
+            # FIX: Use load_adapter here as well for consistency
+            model.model.load_adapter(latest, adapter_name="latest")
+            model.model.set_adapter("latest")
             
     elif model_name == 'frozen':
         ckpt = config.checkpoint_dir / "best_model.pt"
         if ckpt.exists():
             print(f"Loading checkpoint: {ckpt}")
             sd = torch.load(ckpt, map_location=config.device)
-            # Handle nested state dict key if present
             state = sd['model_state'] if 'model_state' in sd else sd
             model.vision_encoder.load_state_dict(state, strict=False)
             

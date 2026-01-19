@@ -207,36 +207,6 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
         try: return f"{results[model][key]:.2f}"
         except: return default
 
-#     print("\n" + "="*60)
-#     print(r"""
-# \begin{table}[t]
-# \centering
-# \caption{Efficiency comparison on NVIDIA RTX A5000 (batch size $=1$).}
-# \label{tab:efficiency}
-# \begin{threeparttable}
-# \setlength{\tabcolsep}{5pt}
-# \begin{tabular}{lccc}
-# \toprule
-# \textbf{Metric} & \textbf{CLIP (Baseline)} & \textbf{Frozen (ResNet+LLM)} & \textbf{LoRA-CLIP (Merged $|$ Unmerged)} \\
-# \midrule
-# """ + f"""Total params (M) & {get_r('CLIP', 'total')} & {get_r('Frozen', 'total')}\\tnote{{a}} & {get_r('LoRA', 'total_mg')} $|$ {get_r('LoRA', 'total_un')} \\\\
-# Trainable params (M) & {get_r('CLIP', 'trainable')} & {get_r('Frozen', 'trainable')}\\tnote{{b}} & {get_r('LoRA', 'trainable_mg')} $|$ {get_r('LoRA', 'trainable_un')} \\\\
-# Peak allocated GPU memory (MB) & {get_r('CLIP', 'mem')} & {get_r('Frozen', 'mem')}\\tnote{{c}} & {get_r('LoRA', 'mem_mg')} $|$ {get_r('LoRA', 'mem_un')} \\\\
-# \\addlinespace
-# Vision latency (ms) & {get_r('CLIP', 'lat')} & {get_r('Frozen', 'vis_lat')} & {get_r('LoRA', 'lat_mg')} $|$ {get_r('LoRA', 'lat_un')} \\\\
-# End-to-end generation latency (ms) & -- & {get_r('Frozen', 'e2e_lat')}\\tnote{{d}} & -- \\\\
-# \\bottomrule
-# \\end{{tabular}}
-# \\begin{{tablenotes}}[flushleft]
-# \\item[a] Total parameters include ResNet-50 vision encoder and GPT2-Large language model.
-# \\item[b] Trainable parameters correspond to the vision-side component; the language model remains frozen.
-# \\item[c] Peak allocated GPU tensor memory measured via \\texttt{{torch.cuda.max\_memory\_allocated()}}.
-# \\item[d] End-to-end generation latency measured using \\texttt{{generate()}} (10 tokens) and includes the full multimodal pipeline.
-# \\end{{tablenotes}}
-# \\end{{threeparttable}}
-# \\end{{table}}
-# """)
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
