@@ -110,7 +110,8 @@ def load_dataset_helper(name, split, transform, config):
     name = name.lower()
     
     if name == 'eurosat':
-        return BenchmarkDatasets.get_eurosat(cache, transform)
+        # FIX: Pass the 'split' argument
+        return BenchmarkDatasets.get_eurosat(cache, transform, split=split)
     
     loaders = {
         'cifar100': BenchmarkDatasets.get_cifar100,

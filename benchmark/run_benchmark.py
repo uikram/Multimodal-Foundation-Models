@@ -233,10 +233,7 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
                 # top_k=1 is mathematically equivalent to do_sample=False (Greedy)
                 # This worked in your V5 script, so it will work here.
                 model.generate(
-                    dummy, 
-                    model.tokenizer, 
-                    max_length=10, 
-                    top_k=1
+                    dummy, model.tokenizer, max_length=10, temperature=1.0, top_k=50 # <--- MATCH PAPER & FIGURES
                 )
         
         # Slightly fewer runs for Gen because it's 50x slower
