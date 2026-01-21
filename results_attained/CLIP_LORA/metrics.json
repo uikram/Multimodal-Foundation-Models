@@ -1,0 +1,196 @@
+{
+    "model_name": "CLIP_LORA",
+    "timestamp": "2026-01-21T00:36:50.544738",
+    "parameters": {},
+    "memory": {},
+    "latency": {},
+    "training_time": {},
+    "evaluation_results": {
+        "cifar100": {
+            "zero_shot": {
+                "top1_accuracy": 61.09,
+                "top5_accuracy": 86.52
+            },
+            "linear_probe": {
+                "accuracy": 77.96,
+                "num_samples": 10000
+            },
+            "few_shot": {
+                "1-shot": {
+                    "accuracy_mean": 30.21,
+                    "accuracy_std": 1.31,
+                    "num_trials": 3
+                },
+                "2-shot": {
+                    "accuracy_mean": 39.64,
+                    "accuracy_std": 1.97,
+                    "num_trials": 3
+                },
+                "4-shot": {
+                    "accuracy_mean": 50.45,
+                    "accuracy_std": 0.19,
+                    "num_trials": 3
+                },
+                "8-shot": {
+                    "accuracy_mean": 58.85,
+                    "accuracy_std": 0.3,
+                    "num_trials": 3
+                },
+                "16-shot": {
+                    "accuracy_mean": 64.8,
+                    "accuracy_std": 0.14,
+                    "num_trials": 3
+                }
+            }
+        },
+        "food101": {
+            "zero_shot": {
+                "top1_accuracy": 79.40594059405942,
+                "top5_accuracy": 96.0118811881188
+            },
+            "linear_probe": {
+                "accuracy": 86.73663366336633,
+                "num_samples": 25250
+            },
+            "few_shot": {
+                "1-shot": {
+                    "accuracy_mean": 39.91,
+                    "accuracy_std": 1.85,
+                    "num_trials": 3
+                },
+                "2-shot": {
+                    "accuracy_mean": 53.33,
+                    "accuracy_std": 0.78,
+                    "num_trials": 3
+                },
+                "4-shot": {
+                    "accuracy_mean": 65.64,
+                    "accuracy_std": 0.85,
+                    "num_trials": 3
+                },
+                "8-shot": {
+                    "accuracy_mean": 74.15,
+                    "accuracy_std": 0.67,
+                    "num_trials": 3
+                },
+                "16-shot": {
+                    "accuracy_mean": 78.56,
+                    "accuracy_std": 0.13,
+                    "num_trials": 3
+                }
+            }
+        },
+        "flowers102": {
+            "zero_shot": {
+                "top1_accuracy": 60.82289803220036,
+                "top5_accuracy": 83.42819970726948
+            },
+            "linear_probe": {
+                "accuracy": 93.75508212717514,
+                "num_samples": 6149
+            },
+            "few_shot": {
+                "1-shot": {
+                    "accuracy_mean": 64.59,
+                    "accuracy_std": 2.73,
+                    "num_trials": 3
+                },
+                "2-shot": {
+                    "accuracy_mean": 78.93,
+                    "accuracy_std": 2.08,
+                    "num_trials": 3
+                },
+                "4-shot": {
+                    "accuracy_mean": 87.78,
+                    "accuracy_std": 0.54,
+                    "num_trials": 3
+                },
+                "8-shot": {
+                    "accuracy_mean": 92.79,
+                    "accuracy_std": 0.13,
+                    "num_trials": 3
+                },
+                "16-shot": {
+                    "accuracy_mean": 92.78,
+                    "accuracy_std": 0.17,
+                    "num_trials": 3
+                }
+            }
+        },
+        "dtd": {
+            "zero_shot": {
+                "top1_accuracy": 40.95744680851064,
+                "top5_accuracy": 75.90425531914894
+            },
+            "linear_probe": {
+                "accuracy": 73.93617021276596,
+                "num_samples": 1880
+            },
+            "few_shot": {
+                "1-shot": {
+                    "accuracy_mean": 35.02,
+                    "accuracy_std": 2.54,
+                    "num_trials": 3
+                },
+                "2-shot": {
+                    "accuracy_mean": 45.74,
+                    "accuracy_std": 2.4,
+                    "num_trials": 3
+                },
+                "4-shot": {
+                    "accuracy_mean": 55.02,
+                    "accuracy_std": 0.37,
+                    "num_trials": 3
+                },
+                "8-shot": {
+                    "accuracy_mean": 62.78,
+                    "accuracy_std": 0.6,
+                    "num_trials": 3
+                },
+                "16-shot": {
+                    "accuracy_mean": 68.05,
+                    "accuracy_std": 0.72,
+                    "num_trials": 3
+                }
+            }
+        },
+        "eurosat": {
+            "zero_shot": {
+                "top1_accuracy": 51.61111111111111,
+                "top5_accuracy": 91.77777777777779
+            },
+            "linear_probe": {
+                "accuracy": 96.07407407407408,
+                "num_samples": 5400
+            },
+            "few_shot": {
+                "1-shot": {
+                    "accuracy_mean": 57.37,
+                    "accuracy_std": 8.84,
+                    "num_trials": 3
+                },
+                "2-shot": {
+                    "accuracy_mean": 68.87,
+                    "accuracy_std": 3.76,
+                    "num_trials": 3
+                },
+                "4-shot": {
+                    "accuracy_mean": 76.23,
+                    "accuracy_std": 1.72,
+                    "num_trials": 3
+                },
+                "8-shot": {
+                    "accuracy_mean": 82.64,
+                    "accuracy_std": 0.35,
+                    "num_trials": 3
+                },
+                "16-shot": {
+                    "accuracy_mean": 86.09,
+                    "accuracy_std": 0.81,
+                    "num_trials": 3
+                }
+            }
+        }
+    },
+    "training_history": {}
+}
