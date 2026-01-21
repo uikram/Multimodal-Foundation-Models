@@ -11,7 +11,7 @@ class CLIPLoRA:
         self.config = config
         self.device = config.device
         
-        # --- FIX: Use config.model_id (not model_name) ---
+        # Use config.model_id
         print(f"Loading CLIP + LoRA (Hugging Face): {config.model_id}")
         
         # Load processor
@@ -22,9 +22,9 @@ class CLIPLoRA:
         
         # Load base model with float16
         base_model = CLIPModel.from_pretrained(
-            config.model_id,  # <--- FIXED (was config.model_name)
+            config.model_id,
             cache_dir=config.cache_dir,
-            torch_dtype=torch.float16  # <--- Added for speed/memory
+            torch_dtype=torch.float16
         )
         
         # Configure LoRA
@@ -68,6 +68,10 @@ class CLIPLoRA:
         
     def parameters(self):
         return self.model.parameters()
+
+    def named_parameters(self):
+        """Expose named_parameters from underlying model for optimizer grouping."""
+        return self.model.named_parameters()
     
     def count_parameters(self):
         total = sum(p.numel() for p in self.model.parameters())

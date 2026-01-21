@@ -1,0 +1,44 @@
+{
+    "model_name": "FROZEN",
+    "timestamp": "2026-01-08T18:58:17.611394",
+    "parameters": {
+        "total_parameters": 28753472,
+        "trainable_parameters": 28753472,
+        "frozen_parameters": 0,
+        "trainable_percentage": 100.0
+    },
+    "memory": {
+        "pre_training_current_gpu_mb": 3171.23,
+        "pre_training_peak_gpu_mb": 3171.23,
+        "pre_training_reserved_gpu_mb": 3254.0,
+        "post_training_current_gpu_mb": 3526.24,
+        "post_training_peak_gpu_mb": 9514.11,
+        "post_training_reserved_gpu_mb": 10336.0
+    },
+    "latency": {},
+    "training_time": {
+        "total_seconds": 326139.18,
+        "total_minutes": 5435.65,
+        "total_hours": 90.5942
+    },
+    "evaluation_results": {},
+    "training_history": {
+        "epochs": [
+            1,
+            2,
+            3
+        ],
+        "train_loss": [
+            3.486869281515551,
+            3.245211155919558,
+            3.14708828502322
+        ],
+        "val_loss": [
+            3.563007275143055,
+            3.539523150643917,
+            3.514382554545547
+        ],
+        "train_accuracy": [],
+        "val_accuracy": []
+    }
+}

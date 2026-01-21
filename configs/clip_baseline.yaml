@@ -16,7 +16,7 @@ data:
 
 evaluation:
   batch_size: 64
-  logistic_regression_c: 0.316
+  # logistic_regression_c: 0.316
   k_shots: [1, 2, 4, 8, 16]
 
 datasets:

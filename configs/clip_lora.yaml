@@ -23,7 +23,7 @@ data:
   annotation_file: "../conceptual_captions_data/train.jsonl"
   
   # Validation (optional)
-  validation_image_dir: "../conceptual_captions_data/validation"
+  validation_image_dir: "../conceptual_captions_data" 
   validation_file: "../conceptual_captions_data/validation.jsonl"
   
   # Cache for benchmark datasets
