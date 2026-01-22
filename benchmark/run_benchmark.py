@@ -1,5 +1,4 @@
 """
-IEEE RA-L Benchmark v6: Final "Paper-Grade" Version
 - Protocol: N=20 Warmup -> N=100 Measurement Loops
 - Stats: Reports Mean +/- Std Dev
 - Input: Uses Local Generator for strict bitwise determinism
@@ -69,20 +68,6 @@ def strict_fp16_setup(model, device):
     model.eval()
     return model
 
-def count_standard_params(model):
-    target = model.model if hasattr(model, 'model') else model
-    total = sum(p.numel() for p in target.parameters())
-    if isinstance(target, PeftModel):
-        trainable, _ = target.get_nb_trainable_parameters()
-    else:
-        trainable = sum(p.numel() for p in target.parameters() if p.requires_grad)
-    return total / 1e6, trainable / 1e6
-
-def count_frozen_params(model):
-    vision = sum(p.numel() for p in model.vision_encoder.parameters()) if hasattr(model, 'vision_encoder') else 0
-    llm = sum(p.numel() for p in model.language_model.parameters()) if hasattr(model, 'language_model') else 0
-    return (vision + llm) / 1e6, vision / 1e6
-
 def measure_peak_memory(func, device):
     if device == 'cpu': return 0.0
     force_cleanup()
@@ -130,7 +115,6 @@ def get_deterministic_input(batch_size, device):
 def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_results.json'):
     BATCH_SIZE = 1 
     results = {}
-    print(f"IEEE RA-L BENCHMARK v6 (Final Protocol)\n")
     print(f"Device: {device}")
     print(f"Protocol: {20} Warmup runs -> {100} Measurement runs")
     print("-" * 60)
@@ -142,7 +126,6 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
         config = load_config_from_yaml("configs/clip_baseline.yaml")
         config.device = "cpu"
         model = get_model("clip", config)
-        total_m, _ = count_standard_params(model)
         model = strict_fp16_setup(model, device)
         
         dummy = get_deterministic_input(BATCH_SIZE, device)
@@ -152,7 +135,6 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
         mem = measure_peak_memory(vis_func, device)
         
         results["CLIP"] = {
-            "total": total_m, 
             "mem": mem,
             "lat_mean": lat_mean,
             "lat_std": lat_std
@@ -180,7 +162,6 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
         print("  -> Measuring Unmerged...")
         lat_un_mean, lat_un_std = measure_latency_stats(vis_func, device=device)
         mem_un = measure_peak_memory(vis_func, device)
-        total_un, train_un = count_standard_params(model)
         print(f"     Result: {lat_un_mean:.2f} +/- {lat_un_std:.2f} ms")
         
         # Merged
@@ -191,13 +172,10 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
         print("  -> Measuring Merged...")
         lat_mg_mean, lat_mg_std = measure_latency_stats(vis_func, device=device)
         mem_mg = measure_peak_memory(vis_func, device)
-        total_mg, train_mg = count_standard_params(model)
         print(f"     Result: {lat_mg_mean:.2f} +/- {lat_mg_std:.2f} ms")
         
         results["LoRA"] = {
-            "total_un": total_un, "trainable_un": train_un, 
             "mem_un": mem_un, "lat_un_mean": lat_un_mean, "lat_un_std": lat_un_std,
-            "total_mg": total_mg, "trainable_mg": train_mg, 
             "mem_mg": mem_mg, "lat_mg_mean": lat_mg_mean, "lat_mg_std": lat_mg_std
         }
         del model
@@ -218,33 +196,42 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
             new_state_dict = {k.replace('vision_encoder.', ''): v for k, v in state_dict.items() if k.startswith('vision_encoder.')}
             model.vision_encoder.load_state_dict(new_state_dict, strict=False)
 
-        total_m, train_m = count_frozen_params(model)
         model = strict_fp16_setup(model, device)
         dummy = get_deterministic_input(BATCH_SIZE, device)
         
-        # Vision Latency
-        vis_func = lambda: model.encode_image(dummy)
-        vis_lat_mean, vis_lat_std = measure_latency_stats(vis_func, device=device)
-        print(f"  -> Visual Result: {vis_lat_mean:.2f} +/- {vis_lat_std:.2f} ms")
+        # === FIX: OFFLOAD LLM FOR PURE VISION BENCHMARK ===
+        print("  -> Offloading LLM to CPU for strict vision memory measurement...")
+        model.language_model.to("cpu") 
+        force_cleanup() # Clear GPU cache so only Vision weights remain
         
+        # Vision Latency & Memory
+        vis_func = lambda: model.encode_image(dummy)
+        
+        # Now this will measure ONLY Vision Weights + Vision Activations
+        vis_mem = measure_peak_memory(vis_func, device) 
+        vis_lat_mean, vis_lat_std = measure_latency_stats(vis_func, device=device)
+        print(f"  -> Visual Result: {vis_lat_mean:.2f} +/- {vis_lat_std:.2f} ms | Mem: {vis_mem:.2f} MB")
+        
+        # === RESTORE LLM FOR E2E BENCHMARK ===
+        print("  -> Reloading LLM to GPU for E2E generation...")
+        model.language_model.to(device)
+        force_cleanup()
+
         # Generation Latency (STRICT LOCKED WORKLOAD)
         def gen_func():
             with torch.no_grad():
-                # top_k=1 is mathematically equivalent to do_sample=False (Greedy)
-                # This worked in your V5 script, so it will work here.
                 model.generate(
-                    dummy, model.tokenizer, max_length=10, temperature=1.0, top_k=50 # <--- MATCH PAPER & FIGURES
+                    dummy, model.tokenizer, max_length=10, temperature=1.0, top_k=50
                 )
         
-        # Slightly fewer runs for Gen because it's 50x slower
         print("  -> Measuring Generation (this takes a moment)...")
         e2e_lat_mean, e2e_lat_std = measure_latency_stats(gen_func, runs=50, warmup=5, device=device)
         e2e_mem = measure_peak_memory(gen_func, device)
         print(f"  -> E2E Result: {e2e_lat_mean:.2f} +/- {e2e_lat_std:.2f} ms")
         
         results["Frozen"] = {
-            "total": total_m, "trainable": train_m,
-            "mem": e2e_mem, 
+            "vis_mem": vis_mem, 
+            "e2e_mem": e2e_mem, 
             "vis_lat_mean": vis_lat_mean, "vis_lat_std": vis_lat_std,
             "e2e_lat_mean": e2e_lat_mean, "e2e_lat_std": e2e_lat_std
         }
@@ -264,8 +251,8 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--output_file', default='benchmark/results/benchmark_results.json')
+    parser.add_argument('--device', default='cuda')
+    parser.add_argument('--output_file', default='benchmark/results/benchmark_results_3_3.json')
     args = parser.parse_args()
     
     run_benchmark(device=args.device, output_file=args.output_file)
