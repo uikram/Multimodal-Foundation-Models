@@ -1,10 +1,3 @@
-"""
-- Protocol: N=20 Warmup -> N=100 Measurement Loops
-- Stats: Reports Mean +/- Std Dev
-- Input: Uses Local Generator for strict bitwise determinism
-- Hardware: Forces FP16 and Deterministic CUBLAS
-"""
-
 import torch
 import json
 import time
@@ -18,7 +11,6 @@ from pathlib import Path
 import warnings
 
 # ============ 1. DETERMINISM SETUP ============
-# This is mandatory for NVIDIA reproducibility
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 def set_seed(seed=42):
@@ -44,7 +36,6 @@ from peft import PeftModel
 
 # ============ CONFIGURATION ============
 CHECKPOINT_PATHS = {
-    # UPDATE THESE PATHS IF NECESSARY
     "FROZEN": "/sda/usama/production_code/frozen_checkpoints/best_model.pt",
     "LORA_ADAPTER": "/sda/usama/production_code/clip_lora_checkpoints/epoch_3",
 }
@@ -82,7 +73,7 @@ def measure_latency_stats(func, runs=100, warmup=20, device='cuda'):
     Protocol: 
     1. Warmup N=20 (Discarded to fix cold-start)
     2. Measure N=100 (Statistical Latency)
-    Returns: Mean (ms), Std (ms)
+    Returns: Dictionary with Mean, Std, p50, p95, p99 (ms)
     """
     # 1. Warmup
     for _ in range(warmup):
@@ -91,7 +82,6 @@ def measure_latency_stats(func, runs=100, warmup=20, device='cuda'):
     
     # 2. Measurement Loop
     timings = []
-    # No cleanup here to simulate continuous control loop state
     for _ in range(runs):
         start = time.perf_counter()
         func()
@@ -99,15 +89,18 @@ def measure_latency_stats(func, runs=100, warmup=20, device='cuda'):
         end = time.perf_counter()
         timings.append((end - start) * 1000) # Convert to ms
     
-    mean_lat = np.mean(timings)
-    std_lat = np.std(timings)
-    return mean_lat, std_lat
+    # === MODIFICATION START: Calculate Percentiles ===
+    stats = {
+        "mean": np.mean(timings),
+        "std": np.std(timings),
+        "p50": np.percentile(timings, 50),
+        "p95": np.percentile(timings, 95),
+        "p99": np.percentile(timings, 99)
+    }
+    # === MODIFICATION END ===
+    return stats
 
 def get_deterministic_input(batch_size, device):
-    """
-    Creates inputs using a local generator. 
-    Ensures input noise is identical across all model runs.
-    """
     gen = torch.Generator(device=device)
     gen.manual_seed(42)
     return torch.randn(batch_size, 3, 224, 224, device=device, dtype=torch.float16, generator=gen)
@@ -131,15 +124,16 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
         dummy = get_deterministic_input(BATCH_SIZE, device)
         
         vis_func = lambda: model.encode_image(dummy)
-        lat_mean, lat_std = measure_latency_stats(vis_func, device=device)
+        
+        # === MODIFICATION: Unpack dictionary ===
+        stats = measure_latency_stats(vis_func, device=device)
         mem = measure_peak_memory(vis_func, device)
         
         results["CLIP"] = {
             "mem": mem,
-            "lat_mean": lat_mean,
-            "lat_std": lat_std
+            **stats # Unpacks mean, std, p50, p95, p99
         }
-        print(f"  -> Result: {lat_mean:.2f} +/- {lat_std:.2f} ms")
+        print(f"  -> Result: {stats['mean']:.2f} +/- {stats['std']:.2f} ms (p99: {stats['p99']:.2f})")
         del model
     except Exception as e: print(f"x Failed: {e}")
 
@@ -160,9 +154,9 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
         
         # Unmerged
         print("  -> Measuring Unmerged...")
-        lat_un_mean, lat_un_std = measure_latency_stats(vis_func, device=device)
+        stats_un = measure_latency_stats(vis_func, device=device)
         mem_un = measure_peak_memory(vis_func, device)
-        print(f"     Result: {lat_un_mean:.2f} +/- {lat_un_std:.2f} ms")
+        print(f"     Result: {stats_un['mean']:.2f} ms (p99: {stats_un['p99']:.2f})")
         
         # Merged
         print("  -> Merging...")
@@ -170,13 +164,13 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
             model.model = model.model.merge_and_unload()
             
         print("  -> Measuring Merged...")
-        lat_mg_mean, lat_mg_std = measure_latency_stats(vis_func, device=device)
+        stats_mg = measure_latency_stats(vis_func, device=device)
         mem_mg = measure_peak_memory(vis_func, device)
-        print(f"     Result: {lat_mg_mean:.2f} +/- {lat_mg_std:.2f} ms")
+        print(f"     Result: {stats_mg['mean']:.2f} ms (p99: {stats_mg['p99']:.2f})")
         
         results["LoRA"] = {
-            "mem_un": mem_un, "lat_un_mean": lat_un_mean, "lat_un_std": lat_un_std,
-            "mem_mg": mem_mg, "lat_mg_mean": lat_mg_mean, "lat_mg_std": lat_mg_std
+            "unmerged": {"mem": mem_un, **stats_un},
+            "merged": {"mem": mem_mg, **stats_mg}
         }
         del model
     except Exception as e: print(f"x Failed: {e}")
@@ -189,7 +183,6 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
         config.device = "cpu"
         model = get_model("frozen", config)
         
-        # Manual checkpoint loading
         if os.path.exists(CHECKPOINT_PATHS["FROZEN"]):
             ckpt = torch.load(CHECKPOINT_PATHS["FROZEN"], map_location='cpu')
             state_dict = ckpt.get('model_state', ckpt)
@@ -199,41 +192,35 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
         model = strict_fp16_setup(model, device)
         dummy = get_deterministic_input(BATCH_SIZE, device)
         
-        # === FIX: OFFLOAD LLM FOR PURE VISION BENCHMARK ===
         print("  -> Offloading LLM to CPU for strict vision memory measurement...")
         model.language_model.to("cpu") 
-        force_cleanup() # Clear GPU cache so only Vision weights remain
+        force_cleanup()
         
-        # Vision Latency & Memory
+        # Vision Latency
         vis_func = lambda: model.encode_image(dummy)
-        
-        # Now this will measure ONLY Vision Weights + Vision Activations
         vis_mem = measure_peak_memory(vis_func, device) 
-        vis_lat_mean, vis_lat_std = measure_latency_stats(vis_func, device=device)
-        print(f"  -> Visual Result: {vis_lat_mean:.2f} +/- {vis_lat_std:.2f} ms | Mem: {vis_mem:.2f} MB")
+        stats_vis = measure_latency_stats(vis_func, device=device)
+        print(f"  -> Visual Result: {stats_vis['mean']:.2f} ms (p99: {stats_vis['p99']:.2f}) | Mem: {vis_mem:.2f} MB")
         
-        # === RESTORE LLM FOR E2E BENCHMARK ===
         print("  -> Reloading LLM to GPU for E2E generation...")
         model.language_model.to(device)
         force_cleanup()
 
-        # Generation Latency (STRICT LOCKED WORKLOAD)
+        # E2E Latency
         def gen_func():
             with torch.no_grad():
                 model.generate(
                     dummy, model.tokenizer, max_length=10, temperature=1.0, top_k=50
                 )
         
-        print("  -> Measuring Generation (this takes a moment)...")
-        e2e_lat_mean, e2e_lat_std = measure_latency_stats(gen_func, runs=50, warmup=5, device=device)
+        print("  -> Measuring Generation...")
+        stats_e2e = measure_latency_stats(gen_func, runs=50, warmup=5, device=device)
         e2e_mem = measure_peak_memory(gen_func, device)
-        print(f"  -> E2E Result: {e2e_lat_mean:.2f} +/- {e2e_lat_std:.2f} ms")
+        print(f"  -> E2E Result: {stats_e2e['mean']:.2f} ms (p99: {stats_e2e['p99']:.2f})")
         
         results["Frozen"] = {
-            "vis_mem": vis_mem, 
-            "e2e_mem": e2e_mem, 
-            "vis_lat_mean": vis_lat_mean, "vis_lat_std": vis_lat_std,
-            "e2e_lat_mean": e2e_lat_mean, "e2e_lat_std": e2e_lat_std
+            "vision": {"mem": vis_mem, **stats_vis},
+            "e2e": {"mem": e2e_mem, **stats_e2e}
         }
         del model
     except Exception as e: print(f"x Failed: {e}")
@@ -252,7 +239,7 @@ def run_benchmark(device='cuda', output_file='benchmark/results/benchmark_result
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', default='cuda')
-    parser.add_argument('--output_file', default='benchmark/results/benchmark_results_3_3.json')
+    parser.add_argument('--output_file', default='benchmark/results/benchmark_results_0_3.json')
     args = parser.parse_args()
     
     run_benchmark(device=args.device, output_file=args.output_file)
